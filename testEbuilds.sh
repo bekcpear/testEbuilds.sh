@@ -5,7 +5,9 @@
 
 MAXJOBS=2
 # SHOULD BE ABSOLUTE PATHES
-FSBASEPATH='/mnt/gentoo-test/stage3'
+#   the FSBASEPATH can be set via environment variable when
+#   running this script to satisfy a specific test environment.
+: ${FSBASEPATH:=/mnt/gentoo-test/stage3}
 REPO_ryans='/home/ryan/Git/ryans-repos'
 REPO_gentoo='/var/db/repos/gentoo.git/gentoo'
 REPO_gentoo_zh='/home/ryan/Git/gentoo-zh'
