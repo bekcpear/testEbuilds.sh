@@ -4,6 +4,13 @@
 #
 
 MAXJOBS=2
+
+# 0 --> disable
+# 1 --> remove corresponding snapshot
+# 2 --> remove corresponding log
+# 3 --> remove corresponding all
+REMOVE_WHEN_SUCCESSED=0
+
 # SHOULD BE ABSOLUTE PATHES
 #   the FSBASEPATH can be set via environment variable when
 #   running this script to satisfy a specific test environment.
@@ -13,8 +20,14 @@ REPO_gentoo='/var/db/repos/gentoo.git/gentoo'
 REPO_gentoo_zh='/home/ryan/Git/gentoo-zh'
 # SHOULD BE ABSOLUTE PATHES
 
+
+
+
+
+#############################################
 #############################################
 # SHOULD NOT MODIFY THE FOLLOWING CODES
+#############################################
 #############################################
 #############################################
 set -e
@@ -119,6 +132,15 @@ if [[ -d ${BINDFDIR} ]]; then
       echo -n " --ro-bind '${path}' '${path#${BINDFDIR}}'"
     done <<<$(find ${BINDFDIR} -type f))
 fi
+
+# remove tmp files and notify something when shell exits
+trap '_log i "removing ${TMPPATH} ..."
+rm -rf ${TMPPATH}
+_log n "You can run
+  # btrfs subvolume delete ${WORKPATH}/*.snapshot
+  # rm -rf ${WORKPATH}
+to delete remaining files."' EXIT
+
 declare -r BWRAPCMD_U="bwrap \
   --bind EACHBASEPATH / \
   --ro-bind /etc/resolv.conf /etc/resolv.conf \
@@ -141,19 +163,29 @@ function _test() {
   if [[ $? -ne 0 ]]; then
     _log e "'${2}' error!"
     _log w "LOG: ${3}"
+  else
+    case ${REMOVE_WHEN_SUCCESSED} in
+      [13])
+        _log i "removing snapshot '${1}' ..."
+        btrfs subvolume delete ${1}
+        ;;&
+      [23])
+        _log i "removing log '${3}' ..."
+        rm -f ${3}
+        ;;
+      [0123])
+        :
+        ;;
+      *)
+        _log w "invalid value(${REMOVE_WHEN_SUCCESSED}) of 'REMOVE_WHEN_SUCCESSED', ignore it."
+        ;;
+    esac
   fi
   flock -x -w 3 "${lockfd}" || _fatal 1 "flock error!"
   echo -n $(( $(cat ${TMPPATH}/JOBS) - 1 )) >${TMPPATH}/JOBS
   flock -u "${lockfd}"
   set -e
 }
-
-trap '_log i "removing ${TMPPATH} ..."
-rm -rf ${TMPPATH}
-_log n "You can run
-  # btrfs subvolume delete ${WORKPATH}/*.snapshot
-  # rm -rf ${WORKPATH}
-to delete files."' EXIT
 
 LOGLEVEL=1
 declare -i JOB=0
