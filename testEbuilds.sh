@@ -246,6 +246,7 @@ for name in ${SETNAMES[@]} ${PKGNAMES[@]}; do
 done
 
 wait
+exec &>/dev/tty
 while read -p 'All jobs are finished, exit?[y/N]' choice; do
   [[ ${choice} =~ ^y|Y$ ]] && exit 0
 done
