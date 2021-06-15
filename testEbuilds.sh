@@ -78,8 +78,11 @@ REPONAME_RAW="${1}"
 REPONAME="${1//-/_}"
 if eval "declare -p REPO_${REPONAME} &>/dev/null"; then
   REPONAME="REPO_${REPONAME}"
+  eval "${REPONAME}=\${${REPONAME}%/}"
+  [[ -d ${!REPONAME} ]] && [[ $(cat ${!REPONAME}/profiles/repo_name) == ${REPONAME_RAW} ]] \
+    || _fatal 1 "'${!REPONAME}' is not a repo directory for '${REPONAME_RAW}'."
 else
-  _fatal 1 "Unknown repo name '${1}'"
+  _fatal 1 "Unknown repo name '${REPONAME_RAW}'"
 fi
 shift
 
