@@ -1,2 +1,8 @@
 */*::ryans
+app-admin/z16::ryans **
+app-admin/razergenie::ryans **
+dev-libs/libopenrazer::ryans **
+dev-util/v2ray-geoip-generator::ryans **
+sys-apps/openrazer_test::ryans **
+
 */*::gentoo-zh

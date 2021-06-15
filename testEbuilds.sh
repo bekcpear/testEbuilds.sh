@@ -3,13 +3,17 @@
 # @bekcpear
 #
 
-MAXJOBS=2
+MAXJOBS=10
 
 # 0 --> disable
-# 1 --> remove corresponding snapshot
+# 1 --> remove corresponding snapshot and command file
 # 2 --> remove corresponding log
 # 3 --> remove corresponding all
 REMOVE_WHEN_SUCCESSED=0
+
+# 0 --> not preserve
+# 1 --> preserve
+PRESERVE_TMP_ERR_LOG=1
 
 # SHOULD BE ABSOLUTE PATHES
 #   the FSBASEPATH can be set via environment variable when
@@ -134,12 +138,18 @@ if [[ -d ${BINDFDIR} ]]; then
 fi
 
 # remove tmp files and notify something when shell exits
-trap '_log i "removing ${TMPPATH} ..."
+trap 'exec &>/dev/tty
+echo
+echo "removing ${TMPPATH} ..."
 rm -rf ${TMPPATH}
-_log n "You can run
-  # btrfs subvolume delete ${WORKPATH}/*.snapshot
-  # rm -rf ${WORKPATH}
-to delete remaining files."' EXIT
+if [[ ${PRESERVE_TMP_ERR_LOG} == 0 ]]; then
+  echo "removing ${TMPPATH}.err.log ..."
+  rm -rf ${TMPPATH}.err.log
+fi
+echo "You can run"
+_log n "  # btrfs subvolume delete ${WORKPATH}/*.snapshot"
+_log n "  # rm -rf ${WORKPATH}"
+echo "to delete remaining files."' EXIT
 
 declare -r BWRAPCMD_U="bwrap \
   --bind EACHBASEPATH / \
@@ -152,11 +162,18 @@ declare -r BWRAPCMD_U="bwrap \
   --proc /proc \
   --tmpfs /var/tmp"
 
+echo -n >${TMPPATH}/RUNNING
+# $1: stacked running job's name
+function _status() {
+  :
+}
+
 echo -n 0 >${TMPPATH}/JOBS
 exec {lockfd}> ${TMPPATH}/LOCK
 # $1: EACHBASEPATH
 # $2: the testing pkgname
 # $3: EACHLOGPATH
+# $4: EACHCMDPATH
 function _test() {
   set +e
   eval "${BWRAPCMD_U/EACHBASEPATH/${1}} /bin/bash -c '${MERGECMD} ${2}' &>${3}"
@@ -168,6 +185,8 @@ function _test() {
       [13])
         _log i "removing snapshot '${1}' ..."
         btrfs subvolume delete ${1}
+        _log i "removing command file '${4}' ..."
+        rm -f ${4}
         ;;&
       [23])
         _log i "removing log '${3}' ..."
@@ -188,6 +207,10 @@ function _test() {
 }
 
 LOGLEVEL=1
+_log n "[      LOG] '${TMPPATH}/LOG'"
+_log n "[ERROR LOG] '${TMPPATH}.err.log'"
+exec 1>>${TMPPATH}/LOG
+exec 2>>${TMPPATH}.err.log
 declare -i JOB=0
 for name in ${SETNAMES[@]} ${PKGNAMES[@]}; do
   JOBS_NOTIFY=0
@@ -205,19 +228,24 @@ for name in ${SETNAMES[@]} ${PKGNAMES[@]}; do
   mkdir -p "${WORKPATH}"
   EACHBASEPATH="${WORKPATH}"/"${pname}".snapshot
   EACHLOGPATH="${EACHBASEPATH%.snapshot}".log
+  EACHCMDPATH="${EACHBASEPATH%.snapshot}".cmd
   btrfs subvolume snapshot "${FSBASEPATH}" "${EACHBASEPATH}"
   _log i "Snapshot ${EACHBASEPATH} created."
   _log i "Testing '${name}' ..."
-  _test "${EACHBASEPATH}" "${name}" "${EACHLOGPATH}" &
+  _test "${EACHBASEPATH}" "${name}" "${EACHLOGPATH}" "${EACHCMDPATH}"&
   flock -x -w 3 "${lockfd}" || _fatal 1 "flock error!"
   echo -n $(( $(cat ${TMPPATH}/JOBS) + 1 )) >${TMPPATH}/JOBS
   flock -u "${lockfd}"
+  echo -n "${BWRAPCMD_U/EACHBASEPATH/${EACHBASEPATH}} /bin/bash --login" >${EACHCMDPATH}
   echo "run"
   _log n "  tail -f ${EACHLOGPATH}"
-  echo "to see the log, and run"
-  _log n "  ${BWRAPCMD_U/EACHBASEPATH/${EACHBASEPATH}} /bin/bash --login"
+  echo "to see the log, and can run command in the following file"
+  _log n "  ${EACHCMDPATH}"
   echo "to enter the test environment interactively."
   echo
 done
 
 wait
+while read -p 'All jobs are finished, exit?[y/N]' choice; do
+  [[ ${choice} =~ ^y|Y$ ]] && exit 0
+done

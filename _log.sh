@@ -2,12 +2,23 @@
 
 # @VARIABLE: LOGLEVEL
 # #DEFAULT: 2
-# @INTERNAL
 # @DESCRIPTION:
 # Used to control output level of messages. Should only be setted
 # by shell itself.
 # 0 -> DEBUG; 1 -> INFO; 2 -> NORMAL; 3 -> WARNNING; 4 -> ERROR
 LOGLEVEL=2
+
+# @VARIABLE: FD_STD_OUT
+# #DEFAULT: 1
+# @DESCRIPTION:
+# The STDOUT file descriptor
+FD_STD_OUT=1
+
+# @VARIABLE: FD_STD_OUT
+# #DEFAULT: 2
+# @DESCRIPTION:
+# The STDERR file descriptor
+FD_STD_ERR=2
 
 # @FUNCTION: _log
 # @USAGE: <[dinwe]> <message>
@@ -24,7 +35,7 @@ LOGLEVEL=2
 function _log() {
   local color='\e[0m'
   local reset='\e[0m'
-  local ofd='&1'
+  local ofd="&${FD_STD_OUT}"
   local -i lv=2
   if [[ ! ${1} =~ ^[dinwe]+$ ]]; then
     echo "UNRECOGNIZED OPTIONS OF INTERNAL <_log> FUNCTION!" >&2
@@ -34,12 +45,12 @@ function _log() {
     *e*)
       lv=4
       color='\e[31m'
-      ofd='&2'
+      ofd="&${FD_STD_ERR}"
       ;;
     *w*)
       lv=3
       color='\e[33m'
-      ofd='&2'
+      ofd="&${FD_STD_ERR}"
       ;;
     *n*)
       lv=2
