@@ -3,7 +3,7 @@
 # @bekcpear
 #
 
-MAXJOBS=10
+MAXJOBS=8
 
 # 0 --> disable
 # 1 --> remove corresponding snapshot and command file
@@ -107,9 +107,11 @@ else
 fi
 shift
 
+declare -a STATUS
 declare -a ATOMS
 for atom; do
   ATOMS+=( "${atom}" )
+  STATUS+=( "WAITING" )
 done
 
 declare -r CURRENTID=${REPONAME}-$(date -d @${STARTTIME} +%Y_%m_%d-%H_%M)-$(uuidgen | cut -d'-' -f1)
@@ -127,13 +129,29 @@ for binding in ${BINDINGS[@]}; do
   BINDING_OPTS+=" --ro-bind '${binding}' '${binding}'"
 done
 if [[ -d ${BINDFDIR} ]]; then
-  BINDING_OPTS+=$(while read -r path; do
-      echo -n " --ro-bind '${path}' '${path#${BINDFDIR}}'"
-    done <<<$(find ${BINDFDIR} -type f))
+  while read -r path; do
+    BINDING_OPTS+=" --ro-bind '${path}' '${path#${BINDFDIR}}'"
+  done <<<$(find ${BINDFDIR} -type f)
 fi
+
+# FDs
+REWIND=${SRCPATH%/*}/rewind
+exec {FD_JOBS}<>${TMPPATH}/JOBS
+exec {FD_LOG}>${TMPPATH}/LOG
+exec {FD_ERR}>${TMPPATH}.err.log
+exec 1>&${FD_LOG}
+exec 2>&${FD_ERR}
+exec {lockfd}>${TMPPATH}/LOCK
+function _close_fd() {
+  eval "exec ${FD_JOBS}>&-"
+  eval "exec ${FD_LOG}>&-"
+  eval "exec ${FD_ERR}>&-"
+  eval "exec ${lockfd}>&-"
+}
 
 # remove tmp files and notify something when shell exits
 trap 'exec &>/dev/tty
+_close_fd
 echo
 echo "removing ${TMPPATH} ..."
 rm -rf ${TMPPATH}
@@ -158,24 +176,69 @@ declare -r BWRAPCMD_U="bwrap \
   --tmpfs /var/tmp"
 
 echo -n >${TMPPATH}/RUNNING
-# $1: stacked running job's name
-function _status() {
-  :
-}
 
-echo -n 0 >${TMPPATH}/JOBS
-exec {lockfd}> ${TMPPATH}/LOCK
+# show status of all jobs
+WAITING='WAITING'
+RUNNING='\e[94mRUNNING\e[0m'
+SUCCESS='\e[96mSUCCESS\e[0m'
+  ERROR='\e[91mERROR  \e[0m'
+function _show_status() {
+  local _id _state
+  local -i maxlen=0 i j
+  local -a jobs logs
+  for _atom in ${ATOMS[@]}; do
+    if [[ ${#_atom} -gt ${maxlen} ]]; then
+      maxlen=${#_atom}
+    fi
+  done
+  for (( i = 0; i < ${#ATOMS[@]}; ++i )) do
+    local -i _diff=$(( ${maxlen} - ${#ATOMS[i]} ))
+    local _space=''
+    for (( j = 0; j < ${_diff}; ++j )); do
+      _space+=' '
+    done
+    eval "jobs[${i}]=\"${_space}\${ATOMS[${i}]}\""
+  done
+  while true; do
+    read -r _id _state _log _
+    if [[ ${_id} == "_" ]]; then
+      break
+    fi
+    if [[ ${_id} =~ ^[[:digit:]]+$ ]]; then
+      eval "STATUS[${_id}]='${_state}'"
+      if [[ -n ${_log} ]]; then
+        eval "logs[${_id}]='  LOG: ${_log}'"
+      fi
+    fi
+    exec &>/dev/tty
+    echo -ne '\e[H\e[J\e[40m'
+    echo "testEbuilds.sh information"
+    echo -ne '\e[0m'
+    _log n "[      LOG] '${TMPPATH}/LOG'"
+    _log n "[ERROR LOG] '${TMPPATH}.err.log'"
+    echo $'\n'"Job list:"
+    for (( i = 0; i < ${#jobs[@]}; ++i )); do
+      eval "echo -e \"  ${jobs[i]}: \${${STATUS[i]}}${logs[i]}\""
+    done
+  done
+}
+exec {FD_STATUS}> >(_show_status)
+echo "A WAITING" >&${FD_STATUS}
+
 # $1: EACHBASEPATH
 # $2: the testing atom
 # $3: EACHLOGPATH
 # $4: EACHCMDPATH
+# $5: JOB ID
 function _test() {
-  set +e
-  eval "${BWRAPCMD_U/EACHBASEPATH/${1}} /bin/bash -c '${MERGECMD} \"${2}\"' &>'${3}'"
-  if [[ $? -ne 0 ]]; then
+  local ret=0
+  eval "${BWRAPCMD_U/EACHBASEPATH/${1}} /bin/bash -c '${MERGECMD} \"${2}\"' &>'${3}'" || ret=1
+  if [[ ${ret} -ne 0 ]]; then
+    echo "${5} ERROR ${3}" >&${FD_STATUS}
     _log e "'${2}' error!"
     _log w "LOG: ${3}"
   else
+    echo "${5} SUCCESS" >&${FD_STATUS}
     case ${REMOVE_WHEN_SUCCESSED} in
       [13])
         _log i "removing snapshot '${1}' ..."
@@ -196,27 +259,24 @@ function _test() {
     esac
   fi
   flock -x -w 3 "${lockfd}" || _fatal 1 "flock error!"
-  echo -n $(( $(cat ${TMPPATH}/JOBS) - 1 )) >${TMPPATH}/JOBS
+  eval "${REWIND} ${FD_JOBS}"
+  local __jobs=$(( $(cat <&${FD_JOBS}) - 1 ))
+  eval "${REWIND} ${FD_JOBS}"
+  echo -n ${__jobs}' ' >&${FD_JOBS}
   flock -u "${lockfd}"
-  set -e
 }
 
 LOGLEVEL=1
-_log n "[      LOG] '${TMPPATH}/LOG'"
-_log n "[ERROR LOG] '${TMPPATH}.err.log'"
-exec 1>>${TMPPATH}/LOG
-exec 2>>${TMPPATH}.err.log
 declare -i JOB=0
 for atom in ${ATOMS[@]}; do
   JOBS_NOTIFY=0
-  while [[ $(cat ${TMPPATH}/JOBS) -ge ${MAXJOBS} ]]; do
+  while [[ $(eval "${REWIND} ${FD_JOBS}"; cat <&${FD_JOBS}) -ge ${MAXJOBS} ]]; do
     if [[ ${JOBS_NOTIFY} == 0 ]]; then
       _log i "Too many jobs. wait ..."
       JOBS_NOTIFY=1
     fi
     sleep 1
   done
-  JOB+=1
   _log i "JOB: ${JOB}"
   _log i "Creating snapshot for ${atom} ..."
   patom=${atom//\//_}
@@ -227,9 +287,14 @@ for atom in ${ATOMS[@]}; do
   btrfs subvolume snapshot "${FSBASEPATH}" "${EACHBASEPATH}"
   _log i "Snapshot ${EACHBASEPATH} created."
   _log i "Testing '${atom}' ..."
-  _test "${EACHBASEPATH}" "${atom}" "${EACHLOGPATH}" "${EACHCMDPATH}" &
+  _test "${EACHBASEPATH}" "${atom}" "${EACHLOGPATH}" "${EACHCMDPATH}" "${JOB}" &
+  echo "${JOB} RUNNING" >&${FD_STATUS}
   flock -x -w 3 "${lockfd}" || _fatal 1 "flock error!"
-  echo -n $(( $(cat ${TMPPATH}/JOBS) + 1 )) >${TMPPATH}/JOBS
+  eval "${REWIND} ${FD_JOBS}"
+  _jobs=$(( $(cat <&${FD_JOBS}) + 1 ))
+  eval "${REWIND} ${FD_JOBS}"
+  echo -n ${_jobs} >&${FD_JOBS}
+  JOB+=1
   flock -u "${lockfd}"
   echo -n "${BWRAPCMD_U/EACHBASEPATH/${EACHBASEPATH}} /bin/bash --login" >"${EACHCMDPATH}"
   echo "run"
@@ -242,6 +307,7 @@ done
 
 wait
 exec &>/dev/tty
+_close_fd
 rmdir --ignore-fail-on-non-empty ${WORKPATH}
 while read -p 'All jobs are finished, exit?[y/N]' choice; do
   [[ ${choice} =~ ^y|Y$ ]] && exit 0
