@@ -3,18 +3,19 @@
 # @bekcpear
 #
 
-set -e
-
 MAXJOBS=2
+# SHOULD BE ABSOLUTE PATHES
 FSBASEPATH='/mnt/gentoo-test/stage3'
 REPO_ryans='/home/ryan/Git/ryans-repos'
 REPO_gentoo='/var/db/repos/gentoo.git/gentoo'
 REPO_gentoo_zh='/home/ryan/Git/gentoo-zh'
+# SHOULD BE ABSOLUTE PATHES
 
-
+#############################################
+# SHOULD NOT MODIFY THE FOLLOWING CODES
 #############################################
 #############################################
-#############################################
+set -e
 STARTTIME=$(date +%s)
 FSBASEPATH="${FSBASEPATH%/}"
 SRCPATH="${0}"
@@ -58,15 +59,16 @@ for arg; do
   case ${arg} in
     -b)
       shift
-      [[ -e ${1} ]] || _fatal 1 "${1} not exists."
-      [[ ${1} != '/' ]] || _fatal 1 "${1} is root(/)."
+      [[ -e ${1} ]] || _fatal 1 "'${1}' not exists."
+      [[ ${1} != '/' ]] || _fatal 1 "'${1}' is root(/)."
+      [[ ${1} =~ ^/ ]] || _fatal 1 "'${1}' must be an absolute path."
       BINDINGS+=( "${1}" )
       shift
       ;;
     -d)
       shift
-      [[ -d ${1} ]] || _fatal 1 "${1} is not a directory."
-      [[ ${1} != '/' ]] || _fatal 1 "${1} is root(/)."
+      [[ -d ${1} ]] || _fatal 1 "'${1}' is not a directory."
+      [[ ${1} != '/' ]] || _fatal 1 "'${1}' is root(/)."
       BINDFDIR="${1}"
       shift
       ;;
