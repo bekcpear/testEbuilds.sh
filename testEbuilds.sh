@@ -8,8 +8,8 @@ MAXJOBS=10
 # 0 --> disable
 # 1 --> remove corresponding snapshot and command file
 # 2 --> remove corresponding log
-# 3 --> remove corresponding all
-REMOVE_WHEN_SUCCESSED=0
+# 3 --> remove corresponding all resources
+REMOVE_WHEN_SUCCESSED=3
 
 # 0 --> not preserve
 # 1 --> preserve
@@ -45,7 +45,7 @@ fi
 
 function _help() {
   cat <<EOF
-Usage: ${0##*/} [-b <dir-path>] [-d <path>] <repo-name> <pkgname/setname>...
+Usage: ${0##*/} [-b <dir-path>] [-d <path>] <repo-name> <atom>...
 
 -b <path>         bind the file/dir to the same path in the environment readonly
 -d <dir-path>     all files under this path will be binded to the test
@@ -107,24 +107,19 @@ else
 fi
 shift
 
-declare -a SETNAMES
-declare -a PKGNAMES
+declare -a ATOMS
 for atom; do
-  if [[ ${atom} =~ ^@ ]]; then
-    SETNAMES+=( "${atom}" )
-  else
-    PKGNAMES+=( "${atom}" )
-  fi
+  ATOMS+=( "${atom}" )
 done
 
-declare -r CURRENTID=${REPONAME}_$(date -d @${STARTTIME} +%Y_%m_%d-%H_%M)_$(uuidgen | cut -d'-' -f1)
-declare -r WORKPATH="${FSBASEPATH%/*}"/_testEbuilds_${CURRENTID}
+declare -r CURRENTID=${REPONAME}-$(date -d @${STARTTIME} +%Y_%m_%d-%H_%M)-$(uuidgen | cut -d'-' -f1)
+declare -r WORKPATH="${FSBASEPATH%/*}"/_testEbuilds-${CURRENTID}
 declare -r MERGECMD="ACCEPT_KEYWORDS='${ACCEPT_KEYWORDS:-amd64}' \
                      ACCEPT_LICENSES='${ACCEPT_LICENSES:-*}' \
                      emerge --autounmask --autounmask-write -v1"
 
 # handle binding files/directories
-declare -r TMPPATH=/tmp/_testEbuilds_${CURRENTID}
+declare -r TMPPATH=/tmp/_testEbuilds-${CURRENTID}
 mkdir -p ${TMPPATH}
 cp ${SRCPATH%/*}/repos.conf ${TMPPATH}/repos.conf
 eval "sed -i 's/#REPONAME#/${REPONAME_RAW}/' ${TMPPATH}/repos.conf"
@@ -152,7 +147,7 @@ _log n "  # rm -rf ${WORKPATH}"
 echo "to delete remaining files."' EXIT
 
 declare -r BWRAPCMD_U="bwrap \
-  --bind EACHBASEPATH / \
+  --bind 'EACHBASEPATH' / \
   --ro-bind /etc/resolv.conf /etc/resolv.conf \
   --ro-bind ${TMPPATH}/repos.conf /etc/portage/repos.conf \
   --ro-bind ${REPO_gentoo} /var/db/repos/gentoo \
@@ -171,12 +166,12 @@ function _status() {
 echo -n 0 >${TMPPATH}/JOBS
 exec {lockfd}> ${TMPPATH}/LOCK
 # $1: EACHBASEPATH
-# $2: the testing pkgname
+# $2: the testing atom
 # $3: EACHLOGPATH
 # $4: EACHCMDPATH
 function _test() {
   set +e
-  eval "${BWRAPCMD_U/EACHBASEPATH/${1}} /bin/bash -c '${MERGECMD} ${2}' &>${3}"
+  eval "${BWRAPCMD_U/EACHBASEPATH/${1}} /bin/bash -c '${MERGECMD} \"${2}\"' &>'${3}'"
   if [[ $? -ne 0 ]]; then
     _log e "'${2}' error!"
     _log w "LOG: ${3}"
@@ -184,13 +179,13 @@ function _test() {
     case ${REMOVE_WHEN_SUCCESSED} in
       [13])
         _log i "removing snapshot '${1}' ..."
-        btrfs subvolume delete ${1}
+        btrfs subvolume delete "${1}"
         _log i "removing command file '${4}' ..."
-        rm -f ${4}
+        rm -f "${4}"
         ;;&
       [23])
         _log i "removing log '${3}' ..."
-        rm -f ${3}
+        rm -f "${3}"
         ;;
       [0123])
         :
@@ -212,7 +207,7 @@ _log n "[ERROR LOG] '${TMPPATH}.err.log'"
 exec 1>>${TMPPATH}/LOG
 exec 2>>${TMPPATH}.err.log
 declare -i JOB=0
-for name in ${SETNAMES[@]} ${PKGNAMES[@]}; do
+for atom in ${ATOMS[@]}; do
   JOBS_NOTIFY=0
   while [[ $(cat ${TMPPATH}/JOBS) -ge ${MAXJOBS} ]]; do
     if [[ ${JOBS_NOTIFY} == 0 ]]; then
@@ -223,22 +218,22 @@ for name in ${SETNAMES[@]} ${PKGNAMES[@]}; do
   done
   JOB+=1
   _log i "JOB: ${JOB}"
-  _log i "Creating snapshot for ${name} ..."
-  pname=${name//\//_}
+  _log i "Creating snapshot for ${atom} ..."
+  patom=${atom//\//_}
   mkdir -p "${WORKPATH}"
-  EACHBASEPATH="${WORKPATH}"/"${pname}".snapshot
+  EACHBASEPATH="${WORKPATH}"/"${patom}".snapshot
   EACHLOGPATH="${EACHBASEPATH%.snapshot}".log
   EACHCMDPATH="${EACHBASEPATH%.snapshot}".cmd
   btrfs subvolume snapshot "${FSBASEPATH}" "${EACHBASEPATH}"
   _log i "Snapshot ${EACHBASEPATH} created."
-  _log i "Testing '${name}' ..."
-  _test "${EACHBASEPATH}" "${name}" "${EACHLOGPATH}" "${EACHCMDPATH}"&
+  _log i "Testing '${atom}' ..."
+  _test "${EACHBASEPATH}" "${atom}" "${EACHLOGPATH}" "${EACHCMDPATH}" &
   flock -x -w 3 "${lockfd}" || _fatal 1 "flock error!"
   echo -n $(( $(cat ${TMPPATH}/JOBS) + 1 )) >${TMPPATH}/JOBS
   flock -u "${lockfd}"
-  echo -n "${BWRAPCMD_U/EACHBASEPATH/${EACHBASEPATH}} /bin/bash --login" >${EACHCMDPATH}
+  echo -n "${BWRAPCMD_U/EACHBASEPATH/${EACHBASEPATH}} /bin/bash --login" >"${EACHCMDPATH}"
   echo "run"
-  _log n "  tail -f ${EACHLOGPATH}"
+  _log n "  tail -f '${EACHLOGPATH}'"
   echo "to see the log, and can run command in the following file"
   _log n "  ${EACHCMDPATH}"
   echo "to enter the test environment interactively."
@@ -247,6 +242,7 @@ done
 
 wait
 exec &>/dev/tty
+rmdir --ignore-fail-on-non-empty ${WORKPATH}
 while read -p 'All jobs are finished, exit?[y/N]' choice; do
   [[ ${choice} =~ ^y|Y$ ]] && exit 0
 done
