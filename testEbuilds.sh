@@ -4,6 +4,7 @@
 #
 
 MAXJOBS=8
+MAXJOBS_FOR_PRETEND=20
 
 # 0 --> disable
 # 1 --> remove corresponding snapshot and command file
@@ -38,6 +39,7 @@ set -e
 STARTTIME=$(date +%s)
 FSBASEPATH="${FSBASEPATH%/}"
 SRCPATH="${0}"
+PRETEND_FLAG=0
 if [[ -L "${SRCPATH}" ]]; then
   eval "SRCPATH=\$(readlink '${SRCPATH}')"
 fi
@@ -45,12 +47,13 @@ fi
 
 function _help() {
   cat <<EOF
-Usage: ${0##*/} [-b <dir-path>] [-d <path>] <repo-name> <atom>...
+Usage: ${0##*/} [-b <dir-path>] [-d <path>] [-p] <repo-name> <atom>...
 
 -b <path>         bind the file/dir to the same path in the environment readonly
 -d <dir-path>     all files under this path will be binded to the test
                   environment readonly. (directories will be ignored)
                   e.g.: <dir-path>/a/bc will be binded to /a/bc
+-p                print emerge information to the log only
 
 ATTENTION: <repo-name> should be setted in this shell at first few lines
                        with its absolute path, the format:
@@ -89,6 +92,11 @@ for arg; do
       [[ -d ${1} ]] || _fatal 1 "'${1}' is not a directory."
       [[ ${1} != '/' ]] || _fatal 1 "'${1}' is root(/)."
       BINDFDIR="${1}"
+      shift
+      ;;
+    -p)
+      PRETEND_FLAG=1
+      MAXJOBS=${MAXJOBS_FOR_PRETEND}
       shift
       ;;
   esac
@@ -180,6 +188,7 @@ echo -n >${TMPPATH}/RUNNING
 # show status of all jobs
 WAITING='WAITING'
 RUNNING='\e[94mRUNNING\e[0m'
+PRETEND='\e[36mPRETEND\e[0m'
 SUCCESS='\e[96mSUCCESS\e[0m'
   ERROR='\e[91mERROR  \e[0m'
 function _show_status() {
@@ -225,6 +234,27 @@ function _show_status() {
 exec {FD_STATUS}> >(_show_status)
 echo "A WAITING" >&${FD_STATUS}
 
+# store the current jobs count
+function _store_jobs() {
+  local _counted=0
+  local -i _counts=0
+  while true; do
+    read -r _op _
+    eval "_counts=\$(( ${_counts} ${_op} 1 ))"
+    flock -w 1 ${FD_JOBS}
+    eval "${REWIND} ${FD_JOBS}"
+    echo -n ${_counts}' ' >&${FD_JOBS}
+    flock -u ${FD_JOBS}
+    if [[ ${_counted} -eq 0 ]]; then
+      _counted=1
+    elif [[ ${_counts} -le 0 ]]; then
+      echo "_" >&${FD_STATUS}
+      break
+    fi
+  done
+}
+exec {FD_JOBS_STORE}> >(_store_jobs)
+
 # $1: EACHBASEPATH
 # $2: the testing atom
 # $3: EACHLOGPATH
@@ -232,13 +262,19 @@ echo "A WAITING" >&${FD_STATUS}
 # $5: JOB ID
 function _test() {
   local ret=0
-  eval "${BWRAPCMD_U/EACHBASEPATH/${1}} /bin/bash -c '${MERGECMD} \"${2}\"' &>'${3}'" || ret=1
+  local _arg _this_log _success_state='SUCCESS'
+  if [[ ${PRETEND_FLAG} == 1 ]]; then
+    _arg='-p'
+    _this_log="${3}"
+    _success_state='PRETEND'
+  fi
+  eval "${BWRAPCMD_U/EACHBASEPATH/${1}} /bin/bash -c '${MERGECMD} ${_arg} \"${2}\"' &>'${3}'" || ret=1
   if [[ ${ret} -ne 0 ]]; then
     echo "${5} ERROR ${3}" >&${FD_STATUS}
     _log e "'${2}' error!"
     _log w "LOG: ${3}"
   else
-    echo "${5} SUCCESS" >&${FD_STATUS}
+    echo "${5} ${_success_state} ${_this_log}" >&${FD_STATUS}
     case ${REMOVE_WHEN_SUCCESSED} in
       [13])
         _log i "removing snapshot '${1}' ..."
@@ -247,8 +283,10 @@ function _test() {
         rm -f "${4}"
         ;;&
       [23])
-        _log i "removing log '${3}' ..."
-        rm -f "${3}"
+        if [[ ${PRETEND_FLAG} == 0 ]]; then
+          _log i "removing log '${3}' ..."
+          rm -f "${3}"
+        fi
         ;;
       [0123])
         :
@@ -258,18 +296,14 @@ function _test() {
         ;;
     esac
   fi
-  flock -x -w 3 "${lockfd}" || _fatal 1 "flock error!"
-  eval "${REWIND} ${FD_JOBS}"
-  local __jobs=$(( $(cat <&${FD_JOBS}) - 1 ))
-  eval "${REWIND} ${FD_JOBS}"
-  echo -n ${__jobs}' ' >&${FD_JOBS}
-  flock -u "${lockfd}"
+  echo "-" >&${FD_JOBS_STORE}
 }
 
 LOGLEVEL=1
 declare -i JOB=0
 for atom in ${ATOMS[@]}; do
   JOBS_NOTIFY=0
+  flock -w 1 ${FD_JOBS}
   while [[ $(eval "${REWIND} ${FD_JOBS}"; cat <&${FD_JOBS}) -ge ${MAXJOBS} ]]; do
     if [[ ${JOBS_NOTIFY} == 0 ]]; then
       _log i "Too many jobs. wait ..."
@@ -277,6 +311,7 @@ for atom in ${ATOMS[@]}; do
     fi
     sleep 1
   done
+  flock -u ${FD_JOBS}
   _log i "JOB: ${JOB}"
   _log i "Creating snapshot for ${atom} ..."
   patom=${atom//\//_}
@@ -289,13 +324,8 @@ for atom in ${ATOMS[@]}; do
   _log i "Testing '${atom}' ..."
   _test "${EACHBASEPATH}" "${atom}" "${EACHLOGPATH}" "${EACHCMDPATH}" "${JOB}" &
   echo "${JOB} RUNNING" >&${FD_STATUS}
-  flock -x -w 3 "${lockfd}" || _fatal 1 "flock error!"
-  eval "${REWIND} ${FD_JOBS}"
-  _jobs=$(( $(cat <&${FD_JOBS}) + 1 ))
-  eval "${REWIND} ${FD_JOBS}"
-  echo -n ${_jobs} >&${FD_JOBS}
+  echo "+" >&${FD_JOBS_STORE}
   JOB+=1
-  flock -u "${lockfd}"
   echo -n "${BWRAPCMD_U/EACHBASEPATH/${EACHBASEPATH}} /bin/bash --login" >"${EACHCMDPATH}"
   echo "run"
   _log n "  tail -f '${EACHLOGPATH}'"
@@ -309,6 +339,6 @@ wait
 exec &>/dev/tty
 _close_fd
 rmdir --ignore-fail-on-non-empty ${WORKPATH}
-while read -p 'All jobs are finished, exit?[y/N]' choice; do
+while read -p 'All jobs are finished, exit?[y/N] ' choice; do
   [[ ${choice} =~ ^y|Y$ ]] && exit 0
 done
