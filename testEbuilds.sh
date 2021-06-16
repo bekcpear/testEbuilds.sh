@@ -62,6 +62,7 @@ Usage: ${0##*/} <opts> <atom>...
   -o <opts>         opts to emerge
   -p                print emerge pretend information to the log only
   -r <repo-path>    add an overlay
+
 EOF
 }
 
@@ -271,7 +272,7 @@ function _show_status() {
   local _id _state
   local -i maxlen=0 i j
   local -a jobs logs
-  for _atom in ${ATOMS[@]}; do
+  for _atom in "${ATOMS[@]}"; do
     if [[ ${#_atom} -gt ${maxlen} ]]; then
       maxlen=${#_atom}
     fi
@@ -334,15 +335,19 @@ function _store_jobs() {
 # $5: EACHCMDPATH
 # $6: JOB ID
 function _test() {
-  local ret=0
-  local _arg _this_log _success_state='SUCCESS'
+  local -i ret=0 i
+  local _atoms=( ${3} )
+  local _atom _arg _this_log _success_state='SUCCESS'
   if [[ ${PRETEND_FLAG} == 1 ]]; then
     _arg='-p'
     _this_log="${4}"
     _success_state='PRETEND'
   fi
   local _cmd="${BWRAPCMD_U/EACHBASEPATH/${1}}"
-  eval "${_cmd/TMPFSPATH/${2}} /bin/bash -c '${MERGECMD} ${_arg} \"${3}\"' &>'${4}'" || ret=1
+  for (( i = 0; i < ${#_atoms[@]}; ++i )); do
+    _atom+=" \"${_atoms[i]}\""
+  done
+  eval "${_cmd/TMPFSPATH/${2}} /bin/bash -c '${MERGECMD} ${_arg} ${_atom}' &>'${4}'" || ret=1
   if [[ ${ret} -ne 0 ]]; then
     echo "${6} ERROR ${4}" >&${FD_STATUS}
     _log e "'${3}' error!"
@@ -410,7 +415,7 @@ else
   echo "A WAITING" >&${FD_STATUS}
 
   declare -i JOB=0
-  for atom in ${ATOMS[@]}; do
+  for atom in "${ATOMS[@]}"; do
     JOBS_NOTIFY=0
     flock -w 2 ${FD_JOBS} || _fatal 1 "flock error!"
     while [[ $(eval "${REWIND} ${FD_JOBS}"; cat <&${FD_JOBS}) -ge ${MAXJOBS} ]]; do
@@ -423,17 +428,18 @@ else
     flock -u ${FD_JOBS}
     _log i "JOB: ${JOB}"
     patom=${atom//\//:}
+    patom=${patom//[[:space:]]/_}
     EACHWORKPATH="${WORKPATH}"/"${patom}"
     EACHBASEPATH="${EACHWORKPATH}"/SNAPSHOT
     EACHTMPPATH="${EACHWORKPATH}"/TMPFS
     EACHLOGPATH="${EACHWORKPATH}"/LOG
     EACHCMDPATH="${EACHWORKPATH}"/CMD
-    _log i "Creating workdir for ${atom} ..."
+    _log i "Creating workdir for '${atom}' ..."
     mkdir ${EACHWORKPATH}
-    _log i "Creating snapshot for ${atom} ..."
+    _log i "Creating snapshot for '${atom}' ..."
     btrfs subvolume snapshot "${FSBASEPATH}" "${EACHBASEPATH}"
     _log i "Snapshot ${EACHBASEPATH} created."
-    _log i "Mounting tmpfs for ${atom} ..."
+    _log i "Mounting tmpfs for '${atom}' ..."
     mkdir "${EACHTMPPATH}"
     mount -t tmpfs tmpfs "${EACHTMPPATH}"
     _log i "Tmpfs has been mounted at ${EACHTMPPATH}."
