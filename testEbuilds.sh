@@ -41,6 +41,7 @@ set -e
 STARTTIME=$(date +%s)
 FSBASEPATH="${FSBASEPATH%/}"
 SRCPATH="${0}"
+PRINTCMD=0
 INTERACTIVE=0
 EXTRAOPTS=
 PRETEND_FLAG=0
@@ -58,6 +59,7 @@ Usage: ${0##*/} [<opts>] <atom>...
   -d <dir-path>     all files under this path will be binded to the test
                     environment readonly. (directories will be ignored)
                     e.g.: <dir-path>/a/bc will be binded to /a/bc
+  -g                print the final executing command for interactive mode and exit
   -i[<id>]          interactive mode, ignore all atoms and '-p' option
                     if <id> provided, script will enter the specified previous one
   -o <opts>         opts to emerge
@@ -74,7 +76,7 @@ getopt -T
 if [[ ${?} != 4 ]]; then
   _fatal 1 "The command 'getopt' of Linux version is necessory to parse parameters."
 fi
-ARGS=$(getopt -o 'b:d:hi::o:pr:' -l 'help' -n 'testEbuilds.sh' -- "$@")
+ARGS=$(getopt -o 'b:d:hgi::o:pr:' -l 'help' -n 'testEbuilds.sh' -- "$@")
 if [[ ${?} != 0 ]]; then
   _help
   exit 0
@@ -102,11 +104,18 @@ while true; do
       _help
       exit 0
       ;;
+    -g)
+      PRINTCMD=1
+      INTERACTIVE=1
+      shift
+      ;;
     -i)
       INTERACTIVE=1
       shift
       if [[ ${1} =~ INTERACTIVE_[a-z0-9]+ ]]; then
         INTERACTIVE_ID=${1}
+      else
+        _log w "'${1}' is not a valid ID, ignore it."
       fi
       shift
       ;;
@@ -129,7 +138,7 @@ while true; do
         EXTRAREPOS_BRANCH+=( "$(git branch --show-current 2>/dev/null)" )
         popd >/dev/null
       else
-        _info w "'${1}' is not an ebuilds repository, ignore it."
+        _log w "'${1}' is not an ebuilds repository, ignore it."
       fi
       shift
       ;;
@@ -401,7 +410,7 @@ if [[ ${INTERACTIVE} == 1 ]]; then
   EACHWORKPATH="${WORKPATH}"/INTERACTIVE
   EACHBASEPATH="${EACHWORKPATH}"/SNAPSHOT
   EACHTMPPATH="${EACHWORKPATH}"/TMPFS
-  if [[ -z ${INTERACTIVE_ID} ]]; then
+  if [[ -z ${INTERACTIVE_ID} && ${PRINTCMD} == 0 ]]; then
     _log i "Creating workdir ..."
     mkdir ${EACHWORKPATH}
     _log i "Creating snapshot ..."
@@ -417,7 +426,11 @@ if [[ ${INTERACTIVE} == 1 ]]; then
   echo
   _log n "ID: ${CURRENTID}"
   BWRAPCMD_EACH="${BWRAPCMD_U/EACHBASEPATH/${EACHBASEPATH}}"
-  eval "${BWRAPCMD_EACH/TMPFSPATH/${EACHTMPPATH}} /bin/bash --login"
+  if [[ ${PRINTCMD} == 1 ]]; then
+    echo "${BWRAPCMD_EACH/TMPFSPATH/${EACHTMPPATH}} /bin/bash --login"
+  else
+    eval "${BWRAPCMD_EACH/TMPFSPATH/${EACHTMPPATH}} /bin/bash --login"
+  fi
 else
   #parallel mode
   _create_fd
