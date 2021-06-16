@@ -4,7 +4,7 @@
 #
 
 
-REPO='ryans'
+REPO='/home/ryan/Git/ryans-repos'
 
 BASE_DIR='/mnt/gentoo-test'
 BINDDIR='/home/ryan/Git/testEbuilds/_test_conf_root'
@@ -18,7 +18,7 @@ SRCPATH=$(realpath "${0}")
 SRCPATH=${SRCPATH%/.tool/*}
 . ${SRCPATH}/_log.sh
 
-eval "BASE_CMD=\"'${SRCPATH}'/testEbuilds.sh -d '${BINDDIR}' ${REPO}\""
+eval "BASE_CMD=\"'${SRCPATH}'/testEbuilds.sh -d '${BINDDIR}' -r ${REPO}\""
 
 _log n "BASE"
 echo "FSBASEPATH=\"${BASE}\" ${BASE_CMD} \
