@@ -249,7 +249,8 @@ declare -r BWRAPCMD_U="bwrap \
   --ro-bind ${REPO_gentoo} /var/db/repos/gentoo \
   ${BINDING_OPTS} \
   --dev /dev \
-  --proc /proc"
+  --proc /proc \
+  --tmpfs /dev/shm"
 
 function _print_config() {
   echo "[          LOG] '${TMPPATH}/LOG'"
@@ -382,6 +383,14 @@ function _test() {
   echo "-" >&${FD_JOBS_STORE}
 }
 
+# bug: https://github.com/containers/bubblewrap/issues/329
+# bug: https://bugs.gentoo.org/496328
+# pr: https://github.com/containers/bubblewrap/pull/406
+function _workaround() {
+  _log i "Setting a workaround to fix /dev/shm permission ..."
+  echo "chmod 1777 /dev/shm" >"${1}"/etc/profile.d/99-bwrap.sh
+}
+
 LOGLEVEL=1
 if [[ ${INTERACTIVE} == 1 ]]; then
   #interactive mode
@@ -394,6 +403,7 @@ if [[ ${INTERACTIVE} == 1 ]]; then
     _log i "Creating snapshot ..."
     btrfs subvolume snapshot "${FSBASEPATH}" "${EACHBASEPATH}"
     _log i "Snapshot ${EACHBASEPATH} created."
+    _workaround "${EACHBASEPATH}"
     _log i "Mounting tmpfs ..."
     mkdir "${EACHTMPPATH}"
     mount -t tmpfs tmpfs "${EACHTMPPATH}"
@@ -443,6 +453,7 @@ else
     mkdir "${EACHTMPPATH}"
     mount -t tmpfs tmpfs "${EACHTMPPATH}"
     _log i "Tmpfs has been mounted at ${EACHTMPPATH}."
+    _workaround "${EACHBASEPATH}"
     _log i "Patching portage ..."
     sed -i 's/0o660/0o644/' "${EACHBASEPATH}"/usr/lib/python*/site-packages/portage/util/_async/PipeLogger.py
     sed -i 's/0o700/0o755/' "${EACHBASEPATH}"/usr/lib/python*/site-packages/portage/package/ebuild/prepare_build_dirs.py
