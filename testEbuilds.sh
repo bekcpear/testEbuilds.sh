@@ -23,6 +23,7 @@ EMERGE_OPTS='--autounmask=y --keep-going -jtv1'
 #   running this script to satisfy a specific test environment.
 : ${FSBASEPATH:=/mnt/gentoo-test/stage3}
 REPO_gentoo='/var/db/repos/gentoo.git/gentoo'
+DISTFILES_PATH='/var/cache/distfiles'
 # SHOULD BE ABSOLUTE PATHES
 
 
@@ -226,7 +227,7 @@ if [[ ${PRESERVE_TMP_ERR_LOG} == 0 ]]; then
   rm -rf ${TMPPATH}.err.log
 fi
 if [[ $(ls -A ${WORKPATH}) == "repos.conf" ]]; then
-  rm ${WORKPATH}/repos.conf
+  rm -rf ${WORKPATH}/repos.conf
   rmdir --ignore-fail-on-non-empty ${WORKPATH}
 fi
 if [[ -d ${WORKPATH} ]]; then
@@ -245,6 +246,7 @@ fi' EXIT
 declare -r BWRAPCMD_U="bwrap \
   --bind 'EACHBASEPATH' / \
   --bind 'TMPFSPATH' /var/tmp \
+  --bind ${DISTFILES_PATH} /var/cache/distfiles \
   --ro-bind /etc/resolv.conf /etc/resolv.conf \
   --ro-bind ${REPO_gentoo} /var/db/repos/gentoo \
   ${BINDING_OPTS} \
@@ -295,6 +297,8 @@ function _show_status() {
       eval "STATUS[${_id}]='${_state}'"
       if [[ -n ${_log} ]]; then
         eval "logs[${_id}]='  LOG: ${_log}'"
+      else
+        eval "logs[${_id}]=''"
       fi
     fi
     exec &>/dev/tty
