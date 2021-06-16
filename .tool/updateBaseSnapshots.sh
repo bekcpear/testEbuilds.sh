@@ -24,6 +24,6 @@ for snapshot in ${SNAPSHOTS[@]}; do
       --dev /dev \
       --proc /proc \
       --tmpfs /var/tmp \
-      /bin/bash -c 'emerge -jvuDN @world'
+      /bin/bash -c 'emerge -jvuDN @world; emerge -c'
   done <<<$(ls -1d ${snapshot})
 done
