@@ -16,7 +16,7 @@ REMOVE_WHEN_SUCCESSED=3
 # 1 --> preserve
 PRESERVE_TMP_ERR_LOG=0
 
-EMERGE_OPTS='--autounmask=y --keep-going -jv1'
+EMERGE_OPTS='--autounmask=y --keep-going -jtv1'
 
 # SHOULD BE ABSOLUTE PATHES
 #   the FSBASEPATH can be set via environment variable when
@@ -51,7 +51,7 @@ fi
 
 function _help() {
   cat <<EOF
-Usage: ${0##*/} <opts> <atom>...
+Usage: ${0##*/} [<opts>] <atom>...
 
   -b <path>         bind the file/dir to the same path in the environment readonly
   -d <dir-path>     all files under this path will be binded to the test
@@ -428,7 +428,7 @@ else
     flock -u ${FD_JOBS}
     _log i "JOB: ${JOB}"
     patom=${atom//\//:}
-    patom=${patom//[[:space:]]/_}
+    patom=${patom//[[:space:]]/@@}
     EACHWORKPATH="${WORKPATH}"/"${patom}"
     EACHBASEPATH="${EACHWORKPATH}"/SNAPSHOT
     EACHTMPPATH="${EACHWORKPATH}"/TMPFS
@@ -449,7 +449,7 @@ else
     sed -i 's/0700/0755/' "${EACHBASEPATH}"/usr/share/portage/config/make.globals
     _log i "Testing '${atom}' ..."
     _test "${EACHBASEPATH}" "${EACHTMPPATH}" "${atom}" "${EACHLOGPATH}" "${EACHCMDPATH}" "${JOB}" &
-    echo "${JOB} RUNNING" >&${FD_STATUS}
+    echo "${JOB} RUNNING ${EACHLOGPATH}" >&${FD_STATUS}
     echo "+" >&${FD_JOBS_STORE}
     JOB+=1
     BWRAPCMD_EACH="${BWRAPCMD_U/EACHBASEPATH/${EACHBASEPATH}}"
