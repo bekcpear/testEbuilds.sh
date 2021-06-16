@@ -16,15 +16,13 @@ REMOVE_WHEN_SUCCESSED=3
 # 1 --> preserve
 PRESERVE_TMP_ERR_LOG=0
 
-EMERGE_OPTS='--autounmask=y -jv1'
+EMERGE_OPTS='--autounmask=y --keep-going -jv1'
 
 # SHOULD BE ABSOLUTE PATHES
 #   the FSBASEPATH can be set via environment variable when
 #   running this script to satisfy a specific test environment.
 : ${FSBASEPATH:=/mnt/gentoo-test/stage3}
-REPO_ryans='/home/ryan/Git/ryans-repos'
 REPO_gentoo='/var/db/repos/gentoo.git/gentoo'
-REPO_gentoo_zh='/home/ryan/Git/gentoo-zh'
 # SHOULD BE ABSOLUTE PATHES
 
 
@@ -38,11 +36,14 @@ REPO_gentoo_zh='/home/ryan/Git/gentoo-zh'
 #############################################
 #############################################
 set -e
+
 STARTTIME=$(date +%s)
 FSBASEPATH="${FSBASEPATH%/}"
 SRCPATH="${0}"
 INTERACTIVE=0
+EXTRAOPTS=
 PRETEND_FLAG=0
+declare -a EXTRAREPOS EXTRAREPOS_NAME EXTRAREPOS_BRANCH BINDINGS BINDINGDIRS
 if [[ -L "${SRCPATH}" ]]; then
   eval "SRCPATH=\$(readlink '${SRCPATH}')"
 fi
@@ -50,40 +51,36 @@ fi
 
 function _help() {
   cat <<EOF
-Usage: ${0##*/} <opts> <repo-name> <atom>...
+Usage: ${0##*/} <opts> <atom>...
 
   -b <path>         bind the file/dir to the same path in the environment readonly
   -d <dir-path>     all files under this path will be binded to the test
                     environment readonly. (directories will be ignored)
                     e.g.: <dir-path>/a/bc will be binded to /a/bc
-  -i [<id>]         interactive mode, ignore all atoms and '-p' option
+  -i[<id>]          interactive mode, ignore all atoms and '-p' option
                     if <id> provided, script will enter the specified previous one
+  -o <opts>         opts to emerge
   -p                print emerge pretend information to the log only
-
-  ATTENTION: <repo-name> should be setted in this shell at first few lines
-                         with its absolute path, the format:
-                            REPO_<repo-name>='<absolute-path>'
-                         and, all '-' in the name should be replaced to '_'.
+  -r <repo-path>    add an overlay
 EOF
 }
 
-if [[ ${1} =~ ^--?h(elp)? ]]; then
+# handle options
+set +e
+unset GETOPT_COMPATIBLE
+getopt -T
+if [[ ${?} != 4 ]]; then
+  _fatal 1 "The command 'getopt' of Linux version is necessory to parse parameters."
+fi
+ARGS=$(getopt -o 'b:d:hi::o:pr:' -l 'help' -n 'testEbuilds.sh' -- "$@")
+if [[ ${?} != 0 ]]; then
   _help
   exit 0
 fi
-
-if [[ ${EUID} -ne 0 ]]; then
-  _fatal 1 "root user only!"
-fi
-
-if ! btrfs subvolume show ${FSBASEPATH} &>/dev/null; then
-  _fatal 1 "Cannot detect such subvolume '${FSBASEPATH}'"
-fi
-
-declare -a BINDINGS
-BINDFDIR=''
-for arg; do
-  case ${arg} in
+set -e
+eval "set -- ${ARGS}"
+while true; do
+  case ${1} in
     -b)
       shift
       [[ -e ${1} ]] || _fatal 1 "'${1}' not exists."
@@ -96,44 +93,64 @@ for arg; do
       shift
       [[ -d ${1} ]] || _fatal 1 "'${1}' is not a directory."
       [[ ${1} != '/' ]] || _fatal 1 "'${1}' is root(/)."
-      BINDFDIR="${1}"
+      BINDINGDIRS+=( "${1%/}" )
       shift
+      ;;
+    -h|--help)
+      _help
+      exit 0
       ;;
     -i)
       INTERACTIVE=1
       shift
       if [[ ${1} =~ INTERACTIVE_[a-z0-9]+ ]]; then
         INTERACTIVE_ID=${1}
-        shift
       fi
+      shift
+      ;;
+    -o)
+      shift
+      EXTRAOPTS+=" ${1}"
+      shift
       ;;
     -p)
       PRETEND_FLAG=1
       MAXJOBS=${MAXJOBS_FOR_PRETEND}
       shift
       ;;
+    -r)
+      shift
+      if [[ -d "${1}" && -f "${1}"/profiles/repo_name ]]; then
+        EXTRAREPOS+=( "${1}" )
+        pushd "${1}" >/dev/null
+        EXTRAREPOS_NAME+=( "$(head -1 profiles/repo_name)" )
+        EXTRAREPOS_BRANCH+=( "$(git branch --show-current 2>/dev/null)" )
+        popd >/dev/null
+      else
+        _info w "'${1}' is not an ebuilds repository, ignore it."
+      fi
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+    *)
+      _fatal "unknown error!"
+      ;;
   esac
 done
-declare -r BINDFDIR=${BINDFDIR%/}
 
-REPOBRANCH='<NONE>' # for git only at present
-REPONAME_RAW="${1}"
-REPONAME="${1//-/_}"
-if eval "declare -p REPO_${REPONAME} &>/dev/null"; then
-  REPONAME="REPO_${REPONAME}"
-  eval "${REPONAME}=\${${REPONAME}%/}"
-  [[ -d ${!REPONAME} ]] && [[ $(cat ${!REPONAME}/profiles/repo_name) == ${REPONAME_RAW} ]] \
-    || _fatal 1 "'${!REPONAME}' is not a repo directory for '${REPONAME_RAW}'."
-  pushd "${!REPONAME}" >/dev/null
-  REPOBRANCH=$(git branch --show-current 2>/dev/null)
-  popd >/dev/null
-else
-  _fatal 1 "Unknown repo name '${REPONAME_RAW}'"
+if [[ ${EUID} -ne 0 ]]; then
+  _fatal 1 "root user only!"
 fi
-shift
 
-declare -a STATUS
+if ! btrfs subvolume show ${FSBASEPATH} &>/dev/null; then
+  _fatal 1 "Cannot detect such subvolume '${FSBASEPATH}'"
+fi
+
 declare -a ATOMS
+declare -a STATUS
 for atom; do
   ATOMS+=( "${atom}" )
   STATUS+=( "WAITING" )
@@ -144,7 +161,7 @@ MERGEENVS="ACCEPT_LICENSE='*'"
 [[ -z ${MAKEOPTS} ]] || MERGEENVS+=" MAKEOPTS='${MAKEOPTS:--j1}'"
 [[ -z ${USE} ]] || MERGEENVS+=" USE='${USE}'"
 if [[ ${INTERACTIVE} == 0 ]]; then
-  declare -r CURRENTID=${REPONAME}-$(date -d @${STARTTIME} +%Y_%m_%d-%H_%M)-$(uuidgen | cut -d'-' -f1)
+  declare -r CURRENTID=$(date -d @${STARTTIME} +%Y_%m_%d-%H_%M)-$(uuidgen | cut -d'-' -f1)
 else
   if [[ -n ${INTERACTIVE_ID} ]]; then
     declare -r CURRENTID=${INTERACTIVE_ID}
@@ -155,22 +172,31 @@ fi
 declare -r WORKPATH="${FSBASEPATH%/*}"/_testEbuilds-${CURRENTID}
 declare -r TMPPATH=/tmp/_testEbuilds-${CURRENTID}
 declare -r MERGEARGS
-declare -r MERGECMD="${MERGEENVS} emerge ${EMERGE_OPTS}"
+declare -r MERGECMD="${MERGEENVS} emerge ${EMERGE_OPTS} ${EXTRAOPTS}"
 
 # prepare directories
 mkdir -p ${WORKPATH}
 mkdir -p ${TMPPATH}
 
 # handle binding files/directories
-cp ${SRCPATH%/*}/repos.conf ${WORKPATH}/repos.conf
-eval "sed -i 's/#REPONAME#/${REPONAME_RAW}/' ${WORKPATH}/repos.conf"
-for binding in ${BINDINGS[@]}; do
-  BINDING_OPTS+=" --ro-bind '${binding}' '${binding}'"
+for _binding in ${BINDINGS[@]}; do
+  BINDING_OPTS+=" --ro-bind '${_binding}' '${_binding}'"
 done
-if [[ -d ${BINDFDIR} ]]; then
-  while read -r path; do
-    BINDING_OPTS+=" --ro-bind '${path}' '${path#${BINDFDIR}}'"
-  done <<<$(find ${BINDFDIR} -type f)
+for _bindingdir in ${BINDINGDIRS[@]}; do
+  if [[ -d ${_bindingdir} ]]; then
+    while read -r path; do
+      BINDING_OPTS+=" --ro-bind '${path}' '${path#${_bindingdir}}'"
+    done <<<$(find ${_bindingdir} -type f)
+  fi
+done
+if [[ ${#EXTRAREPOS[@]} -gt 0 ]]; then
+  mkdir -p ${WORKPATH}/repos.conf
+  for (( i = 0; i < ${#EXTRAREPOS[@]}; ++i )); do
+    cp ${SRCPATH%/*}/repos.conf/template.conf ${WORKPATH}/repos.conf/${EXTRAREPOS_NAME[i]}
+    eval "sed -i 's/#REPONAME#/${EXTRAREPOS_NAME[i]}/' ${WORKPATH}/repos.conf/${EXTRAREPOS_NAME[i]}"
+    BINDING_OPTS+=" --ro-bind "${EXTRAREPOS[i]}" /var/db/repos/${EXTRAREPOS_NAME[i]}"
+  done
+  BINDING_OPTS+=" --ro-bind ${WORKPATH}/repos.conf /etc/portage/repos.conf"
 fi
 
 # FDs
@@ -210,18 +236,30 @@ if [[ -d ${WORKPATH} ]]; then
   _log n "  # umount ${WORKPATH}/**/TMPFS"
   _log n "  # rm -rf ${WORKPATH}"
   echo "to delete remaining files."
+fi
+if [[ ${INTERACTIVE} == 1 ]]; then
+  _log n "ID: ${CURRENTID}"
 fi' EXIT
 
 declare -r BWRAPCMD_U="bwrap \
   --bind 'EACHBASEPATH' / \
   --bind 'TMPFSPATH' /var/tmp \
   --ro-bind /etc/resolv.conf /etc/resolv.conf \
-  --ro-bind ${WORKPATH}/repos.conf /etc/portage/repos.conf \
   --ro-bind ${REPO_gentoo} /var/db/repos/gentoo \
-  --ro-bind ${!REPONAME} /var/db/repos/local \
   ${BINDING_OPTS} \
   --dev /dev \
   --proc /proc"
+
+function _print_config() {
+  echo "[          LOG] '${TMPPATH}/LOG'"
+  echo "[    ERROR LOG] '${TMPPATH}.err.log'"
+  echo "[BASE SNAPSHOT] '${FSBASEPATH}'"
+  echo
+  for (( i = 0; i < ${#EXTRAREPOS[@]}; ++i )); do
+    _log n "[   EXTRA REPO] ᚠ ${EXTRAREPOS_BRANCH[i]} '${EXTRAREPOS[i]}'"
+  done
+  _log n "[ WORKING PATH] '${WORKPATH}'"
+}
 
 # show status of all jobs
 WAITING='WAITING'
@@ -261,12 +299,7 @@ function _show_status() {
     echo -ne '\e[H\e[J\e[40m'
     echo " testEbuilds.sh "
     echo -ne '\e[0m'
-    echo "[          LOG] '${TMPPATH}/LOG'"
-    echo "[    ERROR LOG] '${TMPPATH}.err.log'"
-    echo "[BASE SNAPSHOT] '${FSBASEPATH}'"
-    echo
-    _log n "[         REPO] ᚠ ${REPOBRANCH} '${!REPONAME}'"
-    _log n "[ WORKING PATH] '${WORKPATH}'"
+    _print_config
     echo $'\n'"Job list:"
     for (( i = 0; i < ${#jobs[@]}; ++i )); do
       eval "echo -e \"  ${jobs[i]}: \${${STATUS[i]}}${logs[i]}\""
@@ -361,6 +394,8 @@ if [[ ${INTERACTIVE} == 1 ]]; then
     mount -t tmpfs tmpfs "${EACHTMPPATH}"
     _log i "Tmpfs has been mounted at ${EACHTMPPATH}."
   fi
+  _print_config
+  echo
   _log n "ID: ${CURRENTID}"
   BWRAPCMD_EACH="${BWRAPCMD_U/EACHBASEPATH/${EACHBASEPATH}}"
   eval "${BWRAPCMD_EACH/TMPFSPATH/${EACHTMPPATH}} /bin/bash --login"
