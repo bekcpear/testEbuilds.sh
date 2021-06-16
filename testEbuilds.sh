@@ -41,6 +41,7 @@ set -e
 STARTTIME=$(date +%s)
 FSBASEPATH="${FSBASEPATH%/}"
 SRCPATH="${0}"
+INTERACTIVE=0
 PRETEND_FLAG=0
 if [[ -L "${SRCPATH}" ]]; then
   eval "SRCPATH=\$(readlink '${SRCPATH}')"
@@ -49,12 +50,14 @@ fi
 
 function _help() {
   cat <<EOF
-Usage: ${0##*/} [-b <dir-path>] [-d <path>] [-p] <repo-name> <atom>...
+Usage: ${0##*/} <opts> <repo-name> <atom>...
 
   -b <path>         bind the file/dir to the same path in the environment readonly
   -d <dir-path>     all files under this path will be binded to the test
                     environment readonly. (directories will be ignored)
                     e.g.: <dir-path>/a/bc will be binded to /a/bc
+  -i [<id>]         interactive mode, ignore all atoms and '-p' option
+                    if <id> provided, script will enter the specified previous one
   -p                print emerge pretend information to the log only
 
   ATTENTION: <repo-name> should be setted in this shell at first few lines
@@ -96,6 +99,14 @@ for arg; do
       BINDFDIR="${1}"
       shift
       ;;
+    -i)
+      INTERACTIVE=1
+      shift
+      if [[ ${1} =~ INTERACTIVE_[a-z0-9]+ ]]; then
+        INTERACTIVE_ID=${1}
+        shift
+      fi
+      ;;
     -p)
       PRETEND_FLAG=1
       MAXJOBS=${MAXJOBS_FOR_PRETEND}
@@ -113,9 +124,9 @@ if eval "declare -p REPO_${REPONAME} &>/dev/null"; then
   eval "${REPONAME}=\${${REPONAME}%/}"
   [[ -d ${!REPONAME} ]] && [[ $(cat ${!REPONAME}/profiles/repo_name) == ${REPONAME_RAW} ]] \
     || _fatal 1 "'${!REPONAME}' is not a repo directory for '${REPONAME_RAW}'."
-  pushd "${!REPONAME}"
+  pushd "${!REPONAME}" >/dev/null
   REPOBRANCH=$(git branch --show-current 2>/dev/null)
-  popd
+  popd >/dev/null
 else
   _fatal 1 "Unknown repo name '${REPONAME_RAW}'"
 fi
@@ -132,7 +143,15 @@ MERGEENVS="ACCEPT_LICENSE='*'"
 [[ -z ${ACCEPT_KEYWORDS} ]] || MERGEENVS+=" ACCEPT_KEYWORDS='${ACCEPT_KEYWORDS:-amd64}'"
 [[ -z ${MAKEOPTS} ]] || MERGEENVS+=" MAKEOPTS='${MAKEOPTS:--j1}'"
 [[ -z ${USE} ]] || MERGEENVS+=" USE='${USE}'"
-declare -r CURRENTID=${REPONAME}-$(date -d @${STARTTIME} +%Y_%m_%d-%H_%M)-$(uuidgen | cut -d'-' -f1)
+if [[ ${INTERACTIVE} == 0 ]]; then
+  declare -r CURRENTID=${REPONAME}-$(date -d @${STARTTIME} +%Y_%m_%d-%H_%M)-$(uuidgen | cut -d'-' -f1)
+else
+  if [[ -n ${INTERACTIVE_ID} ]]; then
+    declare -r CURRENTID=${INTERACTIVE_ID}
+  else
+    declare -r CURRENTID=INTERACTIVE_$(uuidgen | cut -d'-' -f1)
+  fi
+fi
 declare -r WORKPATH="${FSBASEPATH%/*}"/_testEbuilds-${CURRENTID}
 declare -r TMPPATH=/tmp/_testEbuilds-${CURRENTID}
 declare -r MERGEARGS
@@ -155,13 +174,14 @@ if [[ -d ${BINDFDIR} ]]; then
 fi
 
 # FDs
-REWIND=${SRCPATH%/*}/rewind
-exec {FD_JOBS}<>${TMPPATH}/JOBS
-exec {FD_LOG}>${TMPPATH}/LOG
-exec {FD_ERR}>${TMPPATH}.err.log
-exec 1>&${FD_LOG}
-exec 2>&${FD_ERR}
+function _create_fd() {
+  REWIND=${SRCPATH%/*}/rewind
+  exec {FD_JOBS}<>${TMPPATH}/JOBS
+  exec {FD_LOG}>${TMPPATH}/LOG
+  exec {FD_ERR}>${TMPPATH}.err.log
+}
 function _close_fd() {
+  [[ -n ${REWIND} ]] || return
   eval "exec ${FD_JOBS}>&-"
   eval "exec ${FD_LOG}>&-"
   eval "exec ${FD_ERR}>&-"
@@ -253,8 +273,6 @@ function _show_status() {
     done
   done
 }
-exec {FD_STATUS}> >(_show_status)
-echo "A WAITING" >&${FD_STATUS}
 
 # store the current jobs count
 function _store_jobs() {
@@ -275,7 +293,6 @@ function _store_jobs() {
     fi
   done
 }
-exec {FD_JOBS_STORE}> >(_store_jobs)
 
 # $1: EACHBASEPATH
 # $2: EACHTMPPATH
@@ -328,58 +345,86 @@ function _test() {
 }
 
 LOGLEVEL=1
-BWRAPCMD_EACH=''
-declare -i JOB=0
-for atom in ${ATOMS[@]}; do
-  JOBS_NOTIFY=0
-  flock -w 2 ${FD_JOBS} || _fatal 1 "flock error!"
-  while [[ $(eval "${REWIND} ${FD_JOBS}"; cat <&${FD_JOBS}) -ge ${MAXJOBS} ]]; do
-    if [[ ${JOBS_NOTIFY} == 0 ]]; then
-      _log i "Too many jobs. wait ..."
-      JOBS_NOTIFY=1
-    fi
-    sleep 1
-  done
-  flock -u ${FD_JOBS}
-  _log i "JOB: ${JOB}"
-  patom=${atom//\//:}
-  EACHWORKPATH="${WORKPATH}"/"${patom}"
+if [[ ${INTERACTIVE} == 1 ]]; then
+  #interactive mode
+  EACHWORKPATH="${WORKPATH}"/INTERACTIVE
   EACHBASEPATH="${EACHWORKPATH}"/SNAPSHOT
   EACHTMPPATH="${EACHWORKPATH}"/TMPFS
-  EACHLOGPATH="${EACHWORKPATH}"/LOG
-  EACHCMDPATH="${EACHWORKPATH}"/CMD
-  _log i "Creating workdir for ${atom} ..."
-  mkdir ${EACHWORKPATH}
-  _log i "Creating snapshot for ${atom} ..."
-  btrfs subvolume snapshot "${FSBASEPATH}" "${EACHBASEPATH}"
-  _log i "Snapshot ${EACHBASEPATH} created."
-  _log i "Mounting tmpfs for ${atom} ..."
-  mkdir "${EACHTMPPATH}"
-  mount -t tmpfs tmpfs "${EACHTMPPATH}"
-  _log i "Tmpfs has been mounted at ${EACHTMPPATH}."
-  _log i "Patching portage ..."
-  sed -i 's/0o660/0o644/' "${EACHBASEPATH}"/usr/lib/python*/site-packages/portage/util/_async/PipeLogger.py
-  sed -i 's/0o700/0o755/' "${EACHBASEPATH}"/usr/lib/python*/site-packages/portage/package/ebuild/prepare_build_dirs.py
-  sed -i 's/0700/0755/' "${EACHBASEPATH}"/usr/share/portage/config/make.globals
-  _log i "Testing '${atom}' ..."
-  _test "${EACHBASEPATH}" "${EACHTMPPATH}" "${atom}" "${EACHLOGPATH}" "${EACHCMDPATH}" "${JOB}" &
-  echo "${JOB} RUNNING" >&${FD_STATUS}
-  echo "+" >&${FD_JOBS_STORE}
-  JOB+=1
+  if [[ -z ${INTERACTIVE_ID} ]]; then
+    _log i "Creating workdir ..."
+    mkdir ${EACHWORKPATH}
+    _log i "Creating snapshot ..."
+    btrfs subvolume snapshot "${FSBASEPATH}" "${EACHBASEPATH}"
+    _log i "Snapshot ${EACHBASEPATH} created."
+    _log i "Mounting tmpfs ..."
+    mkdir "${EACHTMPPATH}"
+    mount -t tmpfs tmpfs "${EACHTMPPATH}"
+    _log i "Tmpfs has been mounted at ${EACHTMPPATH}."
+  fi
+  _log n "ID: ${CURRENTID}"
   BWRAPCMD_EACH="${BWRAPCMD_U/EACHBASEPATH/${EACHBASEPATH}}"
-  echo -n "${BWRAPCMD_EACH/TMPFSPATH/${EACHTMPPATH}} /bin/bash --login" >"${EACHCMDPATH}"
-  echo "run"
-  _log n "  tail -f '${EACHLOGPATH}'"
-  echo "to see the log, and can run command in the following file"
-  _log n "  ${EACHCMDPATH}"
-  echo "to enter the test environment interactively."
-  echo
-done
+  eval "${BWRAPCMD_EACH/TMPFSPATH/${EACHTMPPATH}} /bin/bash --login"
+else
+  #parallel mode
+  _create_fd
+  exec 1>&${FD_LOG}
+  exec 2>&${FD_ERR}
+  BWRAPCMD_EACH=''
+  exec {FD_STATUS}> >(_show_status)
+  exec {FD_JOBS_STORE}> >(_store_jobs)
+  echo "A WAITING" >&${FD_STATUS}
 
-wait
-exec &>/dev/tty
-_close_fd
-echo
-while read -p 'All jobs are finished, exit?[y/N] ' choice; do
-  [[ ${choice} =~ ^y|Y$ ]] && exit 0
-done
+  declare -i JOB=0
+  for atom in ${ATOMS[@]}; do
+    JOBS_NOTIFY=0
+    flock -w 2 ${FD_JOBS} || _fatal 1 "flock error!"
+    while [[ $(eval "${REWIND} ${FD_JOBS}"; cat <&${FD_JOBS}) -ge ${MAXJOBS} ]]; do
+      if [[ ${JOBS_NOTIFY} == 0 ]]; then
+        _log i "Too many jobs. wait ..."
+        JOBS_NOTIFY=1
+      fi
+      sleep 1
+    done
+    flock -u ${FD_JOBS}
+    _log i "JOB: ${JOB}"
+    patom=${atom//\//:}
+    EACHWORKPATH="${WORKPATH}"/"${patom}"
+    EACHBASEPATH="${EACHWORKPATH}"/SNAPSHOT
+    EACHTMPPATH="${EACHWORKPATH}"/TMPFS
+    EACHLOGPATH="${EACHWORKPATH}"/LOG
+    EACHCMDPATH="${EACHWORKPATH}"/CMD
+    _log i "Creating workdir for ${atom} ..."
+    mkdir ${EACHWORKPATH}
+    _log i "Creating snapshot for ${atom} ..."
+    btrfs subvolume snapshot "${FSBASEPATH}" "${EACHBASEPATH}"
+    _log i "Snapshot ${EACHBASEPATH} created."
+    _log i "Mounting tmpfs for ${atom} ..."
+    mkdir "${EACHTMPPATH}"
+    mount -t tmpfs tmpfs "${EACHTMPPATH}"
+    _log i "Tmpfs has been mounted at ${EACHTMPPATH}."
+    _log i "Patching portage ..."
+    sed -i 's/0o660/0o644/' "${EACHBASEPATH}"/usr/lib/python*/site-packages/portage/util/_async/PipeLogger.py
+    sed -i 's/0o700/0o755/' "${EACHBASEPATH}"/usr/lib/python*/site-packages/portage/package/ebuild/prepare_build_dirs.py
+    sed -i 's/0700/0755/' "${EACHBASEPATH}"/usr/share/portage/config/make.globals
+    _log i "Testing '${atom}' ..."
+    _test "${EACHBASEPATH}" "${EACHTMPPATH}" "${atom}" "${EACHLOGPATH}" "${EACHCMDPATH}" "${JOB}" &
+    echo "${JOB} RUNNING" >&${FD_STATUS}
+    echo "+" >&${FD_JOBS_STORE}
+    JOB+=1
+    BWRAPCMD_EACH="${BWRAPCMD_U/EACHBASEPATH/${EACHBASEPATH}}"
+    echo -n "${BWRAPCMD_EACH/TMPFSPATH/${EACHTMPPATH}} /bin/bash --login" >"${EACHCMDPATH}"
+    echo "run"
+    _log n "  tail -f '${EACHLOGPATH}'"
+    echo "to see the log, and can run command in the following file"
+    _log n "  ${EACHCMDPATH}"
+    echo "to enter the test environment interactively."
+    echo
+  done
+
+  wait
+  exec &>/dev/tty
+  echo
+  while read -p 'All jobs are finished, exit?[y/N] ' choice; do
+    [[ ${choice} =~ ^y|Y$ ]] && exit 0
+  done
+fi
