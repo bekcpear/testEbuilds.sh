@@ -1,8 +1,7 @@
-*/*::ryans
-app-admin/z16::ryans **
-app-admin/razergenie::ryans **
-dev-libs/libopenrazer::ryans **
-dev-util/v2ray-geoip-generator::ryans **
-sys-apps/openrazer_test::ryans **
+*/*::ryans **
 
-*/*::gentoo-zh
+#*/*::gentoo-zh
+
+# required by sys-apps/openrazer-3.0.1::ryans
+# required by sys-apps/openrazer (argument)
+dev-python/daemonize
