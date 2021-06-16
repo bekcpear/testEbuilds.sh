@@ -348,7 +348,7 @@ function _test() {
   for (( i = 0; i < ${#_atoms[@]}; ++i )); do
     _atom+=" \"${_atoms[i]}\""
   done
-  eval "${_cmd/TMPFSPATH/${2}} /bin/bash -c '${MERGECMD} ${_arg} ${_atom}' &>'${4}'" || ret=1
+  eval "${_cmd/TMPFSPATH/${2}} /bin/bash --login -c '${MERGECMD} ${_arg} ${_atom}' &>'${4}'" || ret=1
   if [[ ${ret} -ne 0 ]]; then
     echo "${6} ERROR ${4}" >&${FD_STATUS}
     _log e "'${3}' error!"
