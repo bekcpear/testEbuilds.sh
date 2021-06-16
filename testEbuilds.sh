@@ -105,6 +105,7 @@ for arg; do
 done
 declare -r BINDFDIR=${BINDFDIR%/}
 
+REPOBRANCH='<NONE>' # for git only at present
 REPONAME_RAW="${1}"
 REPONAME="${1//-/_}"
 if eval "declare -p REPO_${REPONAME} &>/dev/null"; then
@@ -112,6 +113,9 @@ if eval "declare -p REPO_${REPONAME} &>/dev/null"; then
   eval "${REPONAME}=\${${REPONAME}%/}"
   [[ -d ${!REPONAME} ]] && [[ $(cat ${!REPONAME}/profiles/repo_name) == ${REPONAME_RAW} ]] \
     || _fatal 1 "'${!REPONAME}' is not a repo directory for '${REPONAME_RAW}'."
+  pushd "${!REPONAME}"
+  REPOBRANCH=$(git branch --show-current 2>/dev/null)
+  popd
 else
   _fatal 1 "Unknown repo name '${REPONAME_RAW}'"
 fi
@@ -237,9 +241,11 @@ function _show_status() {
     echo -ne '\e[H\e[J\e[40m'
     echo " testEbuilds.sh "
     echo -ne '\e[0m'
-    _log n "[          LOG] '${TMPPATH}/LOG'"
-    _log n "[    ERROR LOG] '${TMPPATH}.err.log'"
-    _log n "[BASE SNAPSHOT] '${FSBASEPATH}'"
+    echo "[          LOG] '${TMPPATH}/LOG'"
+    echo "[    ERROR LOG] '${TMPPATH}.err.log'"
+    echo "[BASE SNAPSHOT] '${FSBASEPATH}'"
+    echo
+    _log n "[         REPO] ᚠ ${REPOBRANCH} '${!REPONAME}'"
     _log n "[ WORKING PATH] '${WORKPATH}'"
     echo $'\n'"Job list:"
     for (( i = 0; i < ${#jobs[@]}; ++i )); do
