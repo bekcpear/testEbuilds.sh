@@ -12,5 +12,10 @@ e.g.
 setup the first few lines in the shell, and run:
 
 ```bash
-./testEbuilds.sh -d /path/to/_test_conf_root gentoo-zh fcitx5-rime fcitx5-configtool fcitx5-gtk
+# parallel mode
+./testEbuilds.sh -d /path/to/_test_conf_root -r /path/to/extra/repo fcitx5-rime fcitx5-configtool fcitx5-gtk
+
+# interactive mode
+./testEbuilds.sh -d /path/to/_test_conf_root -r /path/to/extra/repo -i
 ```
+
