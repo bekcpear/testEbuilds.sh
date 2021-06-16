@@ -7,14 +7,16 @@ MAXJOBS=8
 MAXJOBS_FOR_PRETEND=20
 
 # 0 --> disable
-# 1 --> remove corresponding snapshot and command file
+# 1 --> remove corresponding snapshot, tmpfs and command file
 # 2 --> remove corresponding log
 # 3 --> remove corresponding all resources
 REMOVE_WHEN_SUCCESSED=3
 
 # 0 --> not preserve
 # 1 --> preserve
-PRESERVE_TMP_ERR_LOG=1
+PRESERVE_TMP_ERR_LOG=0
+
+EMERGE_OPTS='--autounmask=y -jv1'
 
 # SHOULD BE ABSOLUTE PATHES
 #   the FSBASEPATH can be set via environment variable when
@@ -49,16 +51,16 @@ function _help() {
   cat <<EOF
 Usage: ${0##*/} [-b <dir-path>] [-d <path>] [-p] <repo-name> <atom>...
 
--b <path>         bind the file/dir to the same path in the environment readonly
--d <dir-path>     all files under this path will be binded to the test
-                  environment readonly. (directories will be ignored)
-                  e.g.: <dir-path>/a/bc will be binded to /a/bc
--p                print emerge information to the log only
+  -b <path>         bind the file/dir to the same path in the environment readonly
+  -d <dir-path>     all files under this path will be binded to the test
+                    environment readonly. (directories will be ignored)
+                    e.g.: <dir-path>/a/bc will be binded to /a/bc
+  -p                print emerge pretend information to the log only
 
-ATTENTION: <repo-name> should be setted in this shell at first few lines
-                       with its absolute path, the format:
-                          REPO_<repo-name>='<absolute-path>'
-                       and, all '-' in the name should be replaced to '_'.
+  ATTENTION: <repo-name> should be setted in this shell at first few lines
+                         with its absolute path, the format:
+                            REPO_<repo-name>='<absolute-path>'
+                         and, all '-' in the name should be replaced to '_'.
 EOF
 }
 
@@ -122,17 +124,23 @@ for atom; do
   STATUS+=( "WAITING" )
 done
 
+MERGEENVS="ACCEPT_LICENSE='*'"
+[[ -z ${ACCEPT_KEYWORDS} ]] || MERGEENVS+=" ACCEPT_KEYWORDS='${ACCEPT_KEYWORDS:-amd64}'"
+[[ -z ${MAKEOPTS} ]] || MERGEENVS+=" MAKEOPTS='${MAKEOPTS:--j1}'"
+[[ -z ${USE} ]] || MERGEENVS+=" USE='${USE}'"
 declare -r CURRENTID=${REPONAME}-$(date -d @${STARTTIME} +%Y_%m_%d-%H_%M)-$(uuidgen | cut -d'-' -f1)
 declare -r WORKPATH="${FSBASEPATH%/*}"/_testEbuilds-${CURRENTID}
-declare -r MERGECMD="ACCEPT_KEYWORDS='${ACCEPT_KEYWORDS:-amd64}' \
-                     ACCEPT_LICENSES='${ACCEPT_LICENSES:-*}' \
-                     emerge --autounmask --autounmask-write -v1"
+declare -r TMPPATH=/tmp/_testEbuilds-${CURRENTID}
+declare -r MERGEARGS
+declare -r MERGECMD="${MERGEENVS} emerge ${EMERGE_OPTS}"
+
+# prepare directories
+mkdir -p ${WORKPATH}
+mkdir -p ${TMPPATH}
 
 # handle binding files/directories
-declare -r TMPPATH=/tmp/_testEbuilds-${CURRENTID}
-mkdir -p ${TMPPATH}
-cp ${SRCPATH%/*}/repos.conf ${TMPPATH}/repos.conf
-eval "sed -i 's/#REPONAME#/${REPONAME_RAW}/' ${TMPPATH}/repos.conf"
+cp ${SRCPATH%/*}/repos.conf ${WORKPATH}/repos.conf
+eval "sed -i 's/#REPONAME#/${REPONAME_RAW}/' ${WORKPATH}/repos.conf"
 for binding in ${BINDINGS[@]}; do
   BINDING_OPTS+=" --ro-bind '${binding}' '${binding}'"
 done
@@ -149,16 +157,15 @@ exec {FD_LOG}>${TMPPATH}/LOG
 exec {FD_ERR}>${TMPPATH}.err.log
 exec 1>&${FD_LOG}
 exec 2>&${FD_ERR}
-exec {lockfd}>${TMPPATH}/LOCK
 function _close_fd() {
   eval "exec ${FD_JOBS}>&-"
   eval "exec ${FD_LOG}>&-"
   eval "exec ${FD_ERR}>&-"
-  eval "exec ${lockfd}>&-"
 }
 
 # remove tmp files and notify something when shell exits
 trap 'exec &>/dev/tty
+set +e
 _close_fd
 echo
 echo "removing ${TMPPATH} ..."
@@ -167,23 +174,30 @@ if [[ ${PRESERVE_TMP_ERR_LOG} == 0 ]]; then
   echo "removing ${TMPPATH}.err.log ..."
   rm -rf ${TMPPATH}.err.log
 fi
-echo "You can run"
-_log n "  # btrfs subvolume delete ${WORKPATH}/*.snapshot"
-_log n "  # rm -rf ${WORKPATH}"
-echo "to delete remaining files."' EXIT
+if [[ $(ls -A ${WORKPATH}) == "repos.conf" ]]; then
+  rm ${WORKPATH}/repos.conf
+  rmdir --ignore-fail-on-non-empty ${WORKPATH}
+fi
+if [[ -d ${WORKPATH} ]]; then
+  echo "You can run"
+  ls ${WORKPATH}/**/SNAPSHOT &>/dev/null && \
+  _log n "  # btrfs subvolume delete ${WORKPATH}/**/SNAPSHOT"
+  ls ${WORKPATH}/**/TMPFS &>/dev/null && \
+  _log n "  # umount ${WORKPATH}/**/TMPFS"
+  _log n "  # rm -rf ${WORKPATH}"
+  echo "to delete remaining files."
+fi' EXIT
 
 declare -r BWRAPCMD_U="bwrap \
   --bind 'EACHBASEPATH' / \
+  --bind 'TMPFSPATH' /var/tmp \
   --ro-bind /etc/resolv.conf /etc/resolv.conf \
-  --ro-bind ${TMPPATH}/repos.conf /etc/portage/repos.conf \
+  --ro-bind ${WORKPATH}/repos.conf /etc/portage/repos.conf \
   --ro-bind ${REPO_gentoo} /var/db/repos/gentoo \
   --ro-bind ${!REPONAME} /var/db/repos/local \
   ${BINDING_OPTS} \
   --dev /dev \
-  --proc /proc \
-  --tmpfs /var/tmp"
-
-echo -n >${TMPPATH}/RUNNING
+  --proc /proc"
 
 # show status of all jobs
 WAITING='WAITING'
@@ -221,10 +235,12 @@ function _show_status() {
     fi
     exec &>/dev/tty
     echo -ne '\e[H\e[J\e[40m'
-    echo "testEbuilds.sh information"
+    echo " testEbuilds.sh "
     echo -ne '\e[0m'
-    _log n "[      LOG] '${TMPPATH}/LOG'"
-    _log n "[ERROR LOG] '${TMPPATH}.err.log'"
+    _log n "[          LOG] '${TMPPATH}/LOG'"
+    _log n "[    ERROR LOG] '${TMPPATH}.err.log'"
+    _log n "[BASE SNAPSHOT] '${FSBASEPATH}'"
+    _log n "[ WORKING PATH] '${WORKPATH}'"
     echo $'\n'"Job list:"
     for (( i = 0; i < ${#jobs[@]}; ++i )); do
       eval "echo -e \"  ${jobs[i]}: \${${STATUS[i]}}${logs[i]}\""
@@ -241,7 +257,7 @@ function _store_jobs() {
   while true; do
     read -r _op _
     eval "_counts=\$(( ${_counts} ${_op} 1 ))"
-    flock -w 1 ${FD_JOBS}
+    flock -w 2 ${FD_JOBS} || _fatal 1 "flock error!"
     eval "${REWIND} ${FD_JOBS}"
     echo -n ${_counts}' ' >&${FD_JOBS}
     flock -u ${FD_JOBS}
@@ -256,37 +272,43 @@ function _store_jobs() {
 exec {FD_JOBS_STORE}> >(_store_jobs)
 
 # $1: EACHBASEPATH
-# $2: the testing atom
-# $3: EACHLOGPATH
-# $4: EACHCMDPATH
-# $5: JOB ID
+# $2: EACHTMPPATH
+# $3: the testing atom
+# $4: EACHLOGPATH
+# $5: EACHCMDPATH
+# $6: JOB ID
 function _test() {
   local ret=0
   local _arg _this_log _success_state='SUCCESS'
   if [[ ${PRETEND_FLAG} == 1 ]]; then
     _arg='-p'
-    _this_log="${3}"
+    _this_log="${4}"
     _success_state='PRETEND'
   fi
-  eval "${BWRAPCMD_U/EACHBASEPATH/${1}} /bin/bash -c '${MERGECMD} ${_arg} \"${2}\"' &>'${3}'" || ret=1
+  local _cmd="${BWRAPCMD_U/EACHBASEPATH/${1}}"
+  eval "${_cmd/TMPFSPATH/${2}} /bin/bash -c '${MERGECMD} ${_arg} \"${3}\"' &>'${4}'" || ret=1
   if [[ ${ret} -ne 0 ]]; then
-    echo "${5} ERROR ${3}" >&${FD_STATUS}
-    _log e "'${2}' error!"
-    _log w "LOG: ${3}"
+    echo "${6} ERROR ${4}" >&${FD_STATUS}
+    _log e "'${3}' error!"
+    _log w "LOG: ${4}"
   else
-    echo "${5} ${_success_state} ${_this_log}" >&${FD_STATUS}
+    echo "${6} ${_success_state} ${_this_log}" >&${FD_STATUS}
     case ${REMOVE_WHEN_SUCCESSED} in
       [13])
         _log i "removing snapshot '${1}' ..."
         btrfs subvolume delete "${1}"
-        _log i "removing command file '${4}' ..."
-        rm -f "${4}"
+        _log i "umounting '${2}' ..."
+        umount -f "${2}"
+        rmdir --ignore-fail-on-non-empty "${2}"
+        _log i "removing command file '${5}' ..."
+        rm -f "${5}"
         ;;&
       [23])
         if [[ ${PRETEND_FLAG} == 0 ]]; then
-          _log i "removing log '${3}' ..."
-          rm -f "${3}"
+          _log i "removing log '${4}' ..."
+          rm -f "${4}"
         fi
+        rmdir --ignore-fail-on-non-empty "${1%/*}"
         ;;
       [0123])
         :
@@ -300,10 +322,11 @@ function _test() {
 }
 
 LOGLEVEL=1
+BWRAPCMD_EACH=''
 declare -i JOB=0
 for atom in ${ATOMS[@]}; do
   JOBS_NOTIFY=0
-  flock -w 1 ${FD_JOBS}
+  flock -w 2 ${FD_JOBS} || _fatal 1 "flock error!"
   while [[ $(eval "${REWIND} ${FD_JOBS}"; cat <&${FD_JOBS}) -ge ${MAXJOBS} ]]; do
     if [[ ${JOBS_NOTIFY} == 0 ]]; then
       _log i "Too many jobs. wait ..."
@@ -313,20 +336,32 @@ for atom in ${ATOMS[@]}; do
   done
   flock -u ${FD_JOBS}
   _log i "JOB: ${JOB}"
+  patom=${atom//\//:}
+  EACHWORKPATH="${WORKPATH}"/"${patom}"
+  EACHBASEPATH="${EACHWORKPATH}"/SNAPSHOT
+  EACHTMPPATH="${EACHWORKPATH}"/TMPFS
+  EACHLOGPATH="${EACHWORKPATH}"/LOG
+  EACHCMDPATH="${EACHWORKPATH}"/CMD
+  _log i "Creating workdir for ${atom} ..."
+  mkdir ${EACHWORKPATH}
   _log i "Creating snapshot for ${atom} ..."
-  patom=${atom//\//_}
-  mkdir -p "${WORKPATH}"
-  EACHBASEPATH="${WORKPATH}"/"${patom}".snapshot
-  EACHLOGPATH="${EACHBASEPATH%.snapshot}".log
-  EACHCMDPATH="${EACHBASEPATH%.snapshot}".cmd
   btrfs subvolume snapshot "${FSBASEPATH}" "${EACHBASEPATH}"
   _log i "Snapshot ${EACHBASEPATH} created."
+  _log i "Mounting tmpfs for ${atom} ..."
+  mkdir "${EACHTMPPATH}"
+  mount -t tmpfs tmpfs "${EACHTMPPATH}"
+  _log i "Tmpfs has been mounted at ${EACHTMPPATH}."
+  _log i "Patching portage ..."
+  sed -i 's/0o660/0o644/' "${EACHBASEPATH}"/usr/lib/python*/site-packages/portage/util/_async/PipeLogger.py
+  sed -i 's/0o700/0o755/' "${EACHBASEPATH}"/usr/lib/python*/site-packages/portage/package/ebuild/prepare_build_dirs.py
+  sed -i 's/0700/0755/' "${EACHBASEPATH}"/usr/share/portage/config/make.globals
   _log i "Testing '${atom}' ..."
-  _test "${EACHBASEPATH}" "${atom}" "${EACHLOGPATH}" "${EACHCMDPATH}" "${JOB}" &
+  _test "${EACHBASEPATH}" "${EACHTMPPATH}" "${atom}" "${EACHLOGPATH}" "${EACHCMDPATH}" "${JOB}" &
   echo "${JOB} RUNNING" >&${FD_STATUS}
   echo "+" >&${FD_JOBS_STORE}
   JOB+=1
-  echo -n "${BWRAPCMD_U/EACHBASEPATH/${EACHBASEPATH}} /bin/bash --login" >"${EACHCMDPATH}"
+  BWRAPCMD_EACH="${BWRAPCMD_U/EACHBASEPATH/${EACHBASEPATH}}"
+  echo -n "${BWRAPCMD_EACH/TMPFSPATH/${EACHTMPPATH}} /bin/bash --login" >"${EACHCMDPATH}"
   echo "run"
   _log n "  tail -f '${EACHLOGPATH}'"
   echo "to see the log, and can run command in the following file"
@@ -338,7 +373,7 @@ done
 wait
 exec &>/dev/tty
 _close_fd
-rmdir --ignore-fail-on-non-empty ${WORKPATH}
+echo
 while read -p 'All jobs are finished, exit?[y/N] ' choice; do
   [[ ${choice} =~ ^y|Y$ ]] && exit 0
 done
