@@ -63,12 +63,21 @@ Usage: ${0##*/} [<opts>] <atom>...
   -g                print the final executing command for interactive mode and exit
   -i[<ID>]          interactive mode, ignore all atoms and '-p' option
                     if <id> provided, script will enter the specified previous one
+  -m                maintain mode, enter the base snapshot, no other files
   -o <opts>         opts to emerge
   -p                print emerge pretend information to the log only
   -r <repo-path>    add an overlay
 
 EOF
 }
+
+if [[ ${EUID} -ne 0 ]]; then
+  _fatal 1 "root user only!"
+fi
+
+if ! btrfs subvolume show ${FSBASEPATH} &>/dev/null; then
+  _fatal 1 "Cannot detect such subvolume '${FSBASEPATH}'"
+fi
 
 # handle options
 set +e
@@ -77,7 +86,7 @@ getopt -T
 if [[ ${?} != 4 ]]; then
   _fatal 1 "The command 'getopt' of Linux version is necessory to parse parameters."
 fi
-ARGS=$(getopt -o 'b:c:d:hgi::o:pr:' -l 'help' -n 'testEbuilds.sh' -- "$@")
+ARGS=$(getopt -o 'b:c:d:hgi::mo:pr:' -l 'help' -n 'testEbuilds.sh' -- "$@")
 if [[ ${?} != 0 ]]; then
   _help
   exit 0
@@ -96,8 +105,8 @@ while true; do
       ;;
     -c)
       shift
-      if [[ ${RUNNINGMODE} == 'I' ]]; then
-        _fatal "'-c' cannot be used with '-i' or '-g'"
+      if [[ ${RUNNINGMODE} != 'P' ]]; then
+        _fatal "'-c' cannot be used with '-m' or '-g' or '-i'"
       fi
       if [[ ${1} =~ ^PARALLEL_[-_a-z0-9]+$ ]]; then
         CONTINUE_ID=${1}
@@ -118,25 +127,32 @@ while true; do
       exit 0
       ;;
     -g)
-      if [[ -n ${CONTINUE_ID} ]]; then
-        _fatal "'-g' cannot be used with '-c'"
+      if [[ -n ${CONTINUE_ID} || ${RUNNINGMODE} == 'M' ]]; then
+        _fatal "'-g' cannot be used with '-c' or '-m'"
       fi
       PRINTCMD=1
       RUNNINGMODE='I'
       shift
       ;;
     -i)
-      if [[ -n ${CONTINUE_ID} ]]; then
-        _fatal "'-i' cannot be used with '-c'"
+      if [[ -n ${CONTINUE_ID} || ${RUNNINGMODE} == 'M' ]]; then
+        _fatal "'-i' cannot be used with '-c' or '-m'"
       fi
       RUNNINGMODE='I'
       shift
       if [[ ${1} =~ ^INTERACTIVE_[-a-z0-9]+$ ]]; then
         INTERACTIVE_ID=${1}
-      else
+      elif [[ -n ${1} ]]; then
         _fatal "'${1}' is not a valid ID."
       fi
       shift
+      ;;
+    -m)
+      shift
+      if [[ ${RUNNINGMODE} == 'I' || -n ${CONTINUE_ID} ]]; then
+        _fatal "'-m' cannot be used with '-c' or '-g' or '-i'"
+      fi
+      RUNNINGMODE="M"
       ;;
     -o)
       shift
@@ -170,14 +186,6 @@ while true; do
       ;;
   esac
 done
-
-if [[ ${EUID} -ne 0 ]]; then
-  _fatal 1 "root user only!"
-fi
-
-if ! btrfs subvolume show ${FSBASEPATH} &>/dev/null; then
-  _fatal 1 "Cannot detect such subvolume '${FSBASEPATH}'"
-fi
 
 declare -a ATOMS
 declare -a STATUS
@@ -282,7 +290,11 @@ function _clean() {
   _log n "ID: ${CURRENTID}"
 }
 trap 'exec &>/dev/tty
-_close_fd' EXIT
+_close_fd
+if [[ ${RUNNINGMODE} == "I" ]]; then
+  _log n "ID: ${CURRENTID}"
+fi
+' EXIT
 trap 'exec &>/dev/tty
 echo >${TMPPATH}/_IS_ABORTED
 trap SIGINT
@@ -486,70 +498,89 @@ function _prepare_env() {
   fi
 }
 
-LOGLEVEL=1
-_log n "ID: ${CURRENTID}"
-if [[ ${RUNNINGMODE} == 'I' ]]; then
-  #interactive mode
-  EACHWORKPATH="${WORKPATH}"/INTERACTIVE
-  EACHBASEPATH="${EACHWORKPATH}"/SNAPSHOT
-  EACHTMPPATH="${EACHWORKPATH}"/TMPFS
-  if [[ ${PRINTCMD} == 0 ]]; then
-    _prepare_env 'INTERACTIVE' "${FSBASEPATH}" "${EACHBASEPATH}" "${EACHTMPPATH}"
-  fi
-  _print_config
-  echo
-  BWRAPCMD_EACH="${BWRAPCMD_U/EACHBASEPATH/${EACHBASEPATH}}"
-  if [[ ${PRINTCMD} == 1 ]]; then
-    echo "${BWRAPCMD_EACH/TMPFSPATH/${EACHTMPPATH}} /bin/bash --login"
-  else
-    eval "${BWRAPCMD_EACH/TMPFSPATH/${EACHTMPPATH}} /bin/bash --login"
-  fi
-else
-  #parallel mode
-  exec {FD_STATUS}> >(_show_status)
-  exec {FD_JOBS_STORE}> >(_store_jobs)
-  echo "A WAITING" >&${FD_STATUS}
+function _humanize_cmd() {
+  echo -n "$(sed -E 's/\s+\-/ \\\n-/g' <<<${*})"
+}
 
-  declare -i JOB=0
-  for atom in "${ATOMS[@]}"; do
-    JOBS_NOTIFY=0
-    flock -w 2 ${FD_JOBS} || _fatal 1 "flock error!"
-    while [[ $(eval "${REWIND} ${FD_JOBS}"; cat <&${FD_JOBS}) -ge ${MAXJOBS} ]]; do
-      if [[ ${JOBS_NOTIFY} == 0 ]]; then
-        _log i "Too many jobs. wait ..."
-        JOBS_NOTIFY=1
-      fi
-      sleep 1
-    done
-    flock -u ${FD_JOBS}
-    _log i "JOB: ${JOB}"
-    patom=${atom//\//:}
-    patom=${patom//[[:space:]]/@@}
-    EACHWORKPATH="${WORKPATH}"/"${patom}"
+LOGLEVEL=1
+case ${RUNNINGMODE} in
+  M)
+    _log n "Enter maintenance mode ..."
+    _log n "[BASE SNAPSHOT] '${FSBASEPATH}'"
+    BWRAPCMD_EACH="${BWRAPCMD_U/EACHBASEPATH/${FSBASEPATH}}"
+    BWRAPCMD_EACH="$(_humanize_cmd ${BWRAPCMD_EACH})"
+    BWRAPCMD_EACH="${BWRAPCMD_EACH/--bind[[:space:]]\'TMPFSPATH\'/--tmpfs}"
+    echo "RUN: ${BWRAPCMD_EACH} /bin/bash --login"
+    eval "${BWRAPCMD_EACH} /bin/bash --login"
+    _log n "Leave maintenance mode ..."
+    ;;
+  I)
+    #interactive mode
+    _log n "ID: ${CURRENTID}"
+    EACHWORKPATH="${WORKPATH}"/INTERACTIVE
     EACHBASEPATH="${EACHWORKPATH}"/SNAPSHOT
     EACHTMPPATH="${EACHWORKPATH}"/TMPFS
-    EACHLOGPATH="${EACHWORKPATH}"/LOG
-    EACHCMDPATH="${EACHWORKPATH}"/CMD
-    _prepare_env "${atom}" "${FSBASEPATH}" "${EACHBASEPATH}" "${EACHTMPPATH}"
-    _log i "Testing '${atom}' ..."
-    _test "${EACHBASEPATH}" "${EACHTMPPATH}" "${atom}" "${EACHLOGPATH}" "${EACHCMDPATH}" "${JOB}" &
-    echo "${JOB} RUNNING${!} ${EACHLOGPATH}" >&${FD_STATUS}
-    echo "+" >&${FD_JOBS_STORE}
-    JOB+=1
-    BWRAPCMD_EACH="${BWRAPCMD_U/EACHBASEPATH/${EACHBASEPATH}}"
-    echo "${BWRAPCMD_EACH/TMPFSPATH/${EACHTMPPATH}} /bin/bash --login" >>"${EACHCMDPATH}"
-    echo "run"
-    _log n "  tail -f '${EACHLOGPATH}'"
-    echo "to see the log, and can run command in the following file"
-    _log n "  ${EACHCMDPATH}"
-    echo "to enter the test environment interactively."
+    if [[ ${PRINTCMD} == 0 ]]; then
+      _prepare_env 'INTERACTIVE' "${FSBASEPATH}" "${EACHBASEPATH}" "${EACHTMPPATH}"
+    fi
+    _print_config
     echo
-  done
+    BWRAPCMD_EACH="${BWRAPCMD_U/EACHBASEPATH/${EACHBASEPATH}}"
+    if [[ ${PRINTCMD} == 1 ]]; then
+      echo "CMD: $(_humanize_cmd ${BWRAPCMD_EACH/TMPFSPATH/${EACHTMPPATH}}) /bin/bash --login"
+      echo
+    else
+      eval "${BWRAPCMD_EACH/TMPFSPATH/${EACHTMPPATH}} /bin/bash --login"
+    fi
+    ;;
+  P)
+    #parallel mode
+    exec {FD_STATUS}> >(_show_status)
+    exec {FD_JOBS_STORE}> >(_store_jobs)
+    echo "A WAITING" >&${FD_STATUS}
 
-  wait
-  exec &>/dev/tty
-  echo
-  while read -p 'All jobs are finished, exit?[y/N] ' choice; do
-    [[ ${choice} =~ ^y|Y$ ]] && exit 0
-  done
-fi
+    declare -i JOB=0
+    for atom in "${ATOMS[@]}"; do
+      JOBS_NOTIFY=0
+      flock -w 2 ${FD_JOBS} || _fatal 1 "flock error!"
+      while [[ $(eval "${REWIND} ${FD_JOBS}"; cat <&${FD_JOBS}) -ge ${MAXJOBS} ]]; do
+        if [[ ${JOBS_NOTIFY} == 0 ]]; then
+          _log i "Too many jobs. wait ..."
+          JOBS_NOTIFY=1
+        fi
+        sleep 1
+      done
+      flock -u ${FD_JOBS}
+      _log i "JOB: ${JOB}"
+      patom=${atom//\//:}
+      patom=${patom//[[:space:]]/@@}
+      EACHWORKPATH="${WORKPATH}"/"${patom}"
+      EACHBASEPATH="${EACHWORKPATH}"/SNAPSHOT
+      EACHTMPPATH="${EACHWORKPATH}"/TMPFS
+      EACHLOGPATH="${EACHWORKPATH}"/LOG
+      EACHCMDPATH="${EACHWORKPATH}"/CMD
+      _prepare_env "${atom}" "${FSBASEPATH}" "${EACHBASEPATH}" "${EACHTMPPATH}"
+      _log i "Testing '${atom}' ..."
+      _test "${EACHBASEPATH}" "${EACHTMPPATH}" "${atom}" "${EACHLOGPATH}" "${EACHCMDPATH}" "${JOB}" &
+      echo "${JOB} RUNNING${!} ${EACHLOGPATH}" >&${FD_STATUS}
+      echo "+" >&${FD_JOBS_STORE}
+      JOB+=1
+      BWRAPCMD_EACH="${BWRAPCMD_U/EACHBASEPATH/${EACHBASEPATH}}"
+      BWRAPCMD_EACH="${BWRAPCMD_EACH/TMPFSPATH/${EACHTMPPATH}}"
+      echo "$(_humanize_cmd ${BWRAPCMD_EACH}) /bin/bash --login" >>"${EACHCMDPATH}"
+      echo "run"
+      _log n "  tail -f '${EACHLOGPATH}'"
+      echo "to see the log, and can run command in the following file"
+      _log n "  ${EACHCMDPATH}"
+      echo "to enter the test environment interactively."
+      echo
+    done
+
+    wait
+    exec &>/dev/tty
+    echo
+    while read -p 'All jobs are finished, exit?[y/N] ' choice; do
+      [[ ${choice} =~ ^y|Y$ ]] && exit 0
+    done
+    ;;
+esac
