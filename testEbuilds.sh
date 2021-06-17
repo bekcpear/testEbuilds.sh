@@ -346,6 +346,18 @@ function _print_config() {
   _log n "[ WORKING PATH] '${WORKPATH}'"
 }
 
+function _exit_parallel() {
+  exec &>/dev/tty
+  trap '' SIGINT
+  trap '_clean' EXIT
+  while true; do
+    read -r _signal _
+    if [[ ${_signal} == "exit" ]]; then
+      break
+    fi
+  done
+}
+
 # show status of all jobs
 WAITING='WAITING'
 RUNNING='\e[94mRUNNING\e[0m'
@@ -359,7 +371,7 @@ function _show_status() {
   local -i maxlen=0 i j
   local -a jobs job_ids logs
   trap '' SIGINT
-  trap '_clean' EXIT
+  trap 'echo "exit" >&${FD_EXIT}' EXIT
   for _atom in "${ATOMS[@]}"; do
     if [[ ${#_atom} -gt ${maxlen} ]]; then
       maxlen=${#_atom}
@@ -411,7 +423,6 @@ function _show_status() {
 }
 
 # store the current jobs count
-_STORE_JOBS_ID=0
 function _store_jobs() {
   local _counted=0
   local -i _counts=0
@@ -457,7 +468,7 @@ function _test() {
   if [[ ${ret} -ne 0 ]]; then
     _this_log=${4}
     [[ -n ${_aborted} ]] && _state="ABORTED" || _state="ERROR"
-    _log e "'${3}' error!"
+    _log e "'${3}' ${_state}!"
     _log w "LOG: ${4}"
   else
     case ${REMOVE_WHEN_SUCCESSED} in
@@ -562,9 +573,9 @@ case ${RUNNINGMODE} in
     ;;
   P)
     #parallel mode
+    exec {FD_EXIT}> >(_exit_parallel)
     exec {FD_STATUS}> >(_show_status)
     exec {FD_JOBS_STORE}> >(_store_jobs)
-    _STORE_JOBS_ID=$!
     echo "A WAITING" >&${FD_STATUS}
 
     declare -i JOB=0
