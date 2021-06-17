@@ -23,7 +23,8 @@ for snapshot in ${SNAPSHOTS[@]}; do
       --ro-bind ${GENTOOBASE} /var/db/repos/gentoo \
       --dev /dev \
       --proc /proc \
+      --tmpfs /dev/shm \
       --tmpfs /var/tmp \
-      /bin/bash -c 'emerge -jvuDN @world; emerge -c'
+      /bin/bash --login -c 'chmod 1777 /dev/shm; emerge -jvuDN @world; emerge -c'
   done <<<$(ls -1d ${snapshot})
 done
