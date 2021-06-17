@@ -14,7 +14,7 @@ REMOVE_WHEN_SUCCESSED=3
 
 # 0 --> not preserve
 # 1 --> preserve
-PRESERVE_TMP_ERR_LOG=0
+PRESERVE_TMP_ERR_LOG=1
 
 EMERGE_OPTS='--autounmask=y --keep-going -jtv1'
 
@@ -42,7 +42,7 @@ STARTTIME=$(date +%s)
 FSBASEPATH="${FSBASEPATH%/}"
 SRCPATH="${0}"
 PRINTCMD=0
-INTERACTIVE=0
+RUNNINGMODE='P'
 EXTRAOPTS=
 PRETEND_FLAG=0
 declare -a EXTRAREPOS EXTRAREPOS_NAME EXTRAREPOS_BRANCH BINDINGS BINDINGDIRS
@@ -56,11 +56,12 @@ function _help() {
 Usage: ${0##*/} [<opts>] <atom>...
 
   -b <path>         bind the file/dir to the same path in the environment readonly
+  -c <ID>           continue to test in parallel mode with this specified ID
   -d <dir-path>     all files under this path will be binded to the test
                     environment readonly. (directories will be ignored)
                     e.g.: <dir-path>/a/bc will be binded to /a/bc
   -g                print the final executing command for interactive mode and exit
-  -i[<id>]          interactive mode, ignore all atoms and '-p' option
+  -i[<ID>]          interactive mode, ignore all atoms and '-p' option
                     if <id> provided, script will enter the specified previous one
   -o <opts>         opts to emerge
   -p                print emerge pretend information to the log only
@@ -76,7 +77,7 @@ getopt -T
 if [[ ${?} != 4 ]]; then
   _fatal 1 "The command 'getopt' of Linux version is necessory to parse parameters."
 fi
-ARGS=$(getopt -o 'b:d:hgi::o:pr:' -l 'help' -n 'testEbuilds.sh' -- "$@")
+ARGS=$(getopt -o 'b:c:d:hgi::o:pr:' -l 'help' -n 'testEbuilds.sh' -- "$@")
 if [[ ${?} != 0 ]]; then
   _help
   exit 0
@@ -93,6 +94,18 @@ while true; do
       BINDINGS+=( "${1}" )
       shift
       ;;
+    -c)
+      shift
+      if [[ ${RUNNINGMODE} == 'I' ]]; then
+        _fatal "'-c' cannot be used with '-i' or '-g'"
+      fi
+      if [[ ${1} =~ ^PARALLEL_[-_a-z0-9]+$ ]]; then
+        CONTINUE_ID=${1}
+      else
+        _fatal 1 "'${1}' is not a valid ID."
+      fi
+      shift
+      ;;
     -d)
       shift
       [[ -d ${1} ]] || _fatal 1 "'${1}' is not a directory."
@@ -105,17 +118,23 @@ while true; do
       exit 0
       ;;
     -g)
+      if [[ -n ${CONTINUE_ID} ]]; then
+        _fatal "'-g' cannot be used with '-c'"
+      fi
       PRINTCMD=1
-      INTERACTIVE=1
+      RUNNINGMODE='I'
       shift
       ;;
     -i)
-      INTERACTIVE=1
+      if [[ -n ${CONTINUE_ID} ]]; then
+        _fatal "'-i' cannot be used with '-c'"
+      fi
+      RUNNINGMODE='I'
       shift
-      if [[ ${1} =~ INTERACTIVE_[a-z0-9]+ ]]; then
+      if [[ ${1} =~ ^INTERACTIVE_[-a-z0-9]+$ ]]; then
         INTERACTIVE_ID=${1}
       else
-        _log w "'${1}' is not a valid ID, ignore it."
+        _fatal "'${1}' is not a valid ID."
       fi
       shift
       ;;
@@ -138,7 +157,7 @@ while true; do
         EXTRAREPOS_BRANCH+=( "$(git branch --show-current 2>/dev/null)" )
         popd >/dev/null
       else
-        _log w "'${1}' is not an ebuilds repository, ignore it."
+        _fatal 1 "'${1}' is not an ebuilds repository."
       fi
       shift
       ;;
@@ -171,15 +190,22 @@ MERGEENVS="ACCEPT_LICENSE='*'"
 [[ -z ${ACCEPT_KEYWORDS} ]] || MERGEENVS+=" ACCEPT_KEYWORDS='${ACCEPT_KEYWORDS:-amd64}'"
 [[ -z ${MAKEOPTS} ]] || MERGEENVS+=" MAKEOPTS='${MAKEOPTS:--j1}'"
 [[ -z ${USE} ]] || MERGEENVS+=" USE='${USE}'"
-if [[ ${INTERACTIVE} == 0 ]]; then
-  declare -r CURRENTID=$(date -d @${STARTTIME} +%Y_%m_%d-%H_%M)-$(uuidgen | cut -d'-' -f1)
-else
-  if [[ -n ${INTERACTIVE_ID} ]]; then
-    declare -r CURRENTID=${INTERACTIVE_ID}
-  else
-    declare -r CURRENTID=INTERACTIVE_$(uuidgen | cut -d'-' -f1)
-  fi
-fi
+case ${RUNNINGMODE} in
+  P)
+    if [[ -z ${CONTINUE_ID} ]]; then
+      declare -r CURRENTID=PARALLEL_$(date -d @${STARTTIME} +%Y_%m_%d-%H_%M)-$(uuidgen | cut -d'-' -f1)
+    else
+      declare -r CURRENTID=${CONTINUE_ID}
+    fi
+    ;;
+  I)
+    if [[ -z ${INTERACTIVE_ID} ]]; then
+      declare -r CURRENTID=INTERACTIVE_$(uuidgen | cut -d'-' -f1)
+    else
+      declare -r CURRENTID=${INTERACTIVE_ID}
+    fi
+    ;;
+esac
 declare -r WORKPATH="${FSBASEPATH%/*}"/_testEbuilds-${CURRENTID}
 declare -r TMPPATH=/tmp/_testEbuilds-${CURRENTID}
 declare -r MERGEARGS
@@ -188,6 +214,25 @@ declare -r MERGECMD="${MERGEENVS} emerge ${EMERGE_OPTS} ${EXTRAOPTS}"
 # prepare directories
 mkdir -p ${WORKPATH}
 mkdir -p ${TMPPATH}
+
+# FDs
+function _create_fd() {
+  REWIND=${SRCPATH%/*}/rewind
+  exec {FD_JOBS}<>${TMPPATH}/JOBS
+  exec {FD_LOG}>${TMPPATH}/LOG
+  exec {FD_ERR}>${TMPPATH}.err.log
+}
+function _close_fd() {
+  [[ -n ${REWIND} ]] || return
+  eval "exec ${FD_JOBS}>&-"
+  eval "exec ${FD_LOG}>&-"
+  eval "exec ${FD_ERR}>&-"
+}
+if [[ ${RUNNINGMODE} == 'P' ]]; then
+  _create_fd
+  exec 1>&${FD_LOG}
+  exec 2>&${FD_ERR}
+fi
 
 # handle binding files/directories
 for _binding in ${BINDINGS[@]}; do
@@ -210,47 +255,39 @@ if [[ ${#EXTRAREPOS[@]} -gt 0 ]]; then
   BINDING_OPTS+=" --ro-bind ${WORKPATH}/repos.conf /etc/portage/repos.conf"
 fi
 
-# FDs
-function _create_fd() {
-  REWIND=${SRCPATH%/*}/rewind
-  exec {FD_JOBS}<>${TMPPATH}/JOBS
-  exec {FD_LOG}>${TMPPATH}/LOG
-  exec {FD_ERR}>${TMPPATH}.err.log
-}
-function _close_fd() {
-  [[ -n ${REWIND} ]] || return
-  eval "exec ${FD_JOBS}>&-"
-  eval "exec ${FD_LOG}>&-"
-  eval "exec ${FD_ERR}>&-"
-}
-
 # remove tmp files and notify something when shell exits
-trap 'exec &>/dev/tty
-set +e
-_close_fd
-echo
-echo "removing ${TMPPATH} ..."
-rm -rf ${TMPPATH}
-if [[ ${PRESERVE_TMP_ERR_LOG} == 0 ]]; then
-  echo "removing ${TMPPATH}.err.log ..."
-  rm -rf ${TMPPATH}.err.log
-fi
-if [[ $(ls -A ${WORKPATH}) == "repos.conf" ]]; then
-  rm -rf ${WORKPATH}/repos.conf
-  rmdir --ignore-fail-on-non-empty ${WORKPATH}
-fi
-if [[ -d ${WORKPATH} ]]; then
-  echo "You can run"
-  ls ${WORKPATH}/**/SNAPSHOT &>/dev/null && \
-  _log n "  # btrfs subvolume delete ${WORKPATH}/**/SNAPSHOT"
-  ls ${WORKPATH}/**/TMPFS &>/dev/null && \
-  _log n "  # umount ${WORKPATH}/**/TMPFS"
-  _log n "  # rm -rf ${WORKPATH}"
-  echo "to delete remaining files."
-fi
-if [[ ${INTERACTIVE} == 1 ]]; then
+function _clean() {
+  set +e
+  [[ ! -e ${TMPPATH}/_IS_ABORTED ]] || echo $'\n'"aborting ..."
+  echo
+  echo "removing ${TMPPATH} ..."
+  rm -rf ${TMPPATH}
+  if [[ ${PRESERVE_TMP_ERR_LOG} == 0 ]]; then
+    echo "removing ${TMPPATH}.err.log ..."
+    rm -rf ${TMPPATH}.err.log
+  fi
+  if [[ $(ls -A ${WORKPATH}) == "repos.conf" ]]; then
+    rm -rf ${WORKPATH}/repos.conf
+    rmdir --ignore-fail-on-non-empty ${WORKPATH}
+  fi
+  if [[ -d ${WORKPATH} ]]; then
+    echo "You can run"
+    find "${WORKPATH}"/ -maxdepth 2 -name "SNAPSHOT" &>/dev/null && \
+    _log n "  # btrfs subvolume delete ${WORKPATH}/*/SNAPSHOT"
+    find "${WORKPATH}"/ -maxdepth 2 -name "TMPFS" &>/dev/null && \
+    _log n "  # umount ${WORKPATH}/*/TMPFS"
+    _log n "  # rm -rf ${WORKPATH}"
+    echo "to delete remaining files."
+  fi
   _log n "ID: ${CURRENTID}"
-fi' EXIT
+}
+trap 'exec &>/dev/tty
+_close_fd' EXIT
+trap 'exec &>/dev/tty
+echo >${TMPPATH}/_IS_ABORTED
+trap SIGINT
+trap SIGTERM
+kill -INT 0' SIGINT SIGTERM
 
 declare -r BWRAPCMD_U="bwrap \
   --bind 'EACHBASEPATH' / \
@@ -280,10 +317,13 @@ RUNNING='\e[94mRUNNING\e[0m'
 PRETEND='\e[36mPRETEND\e[0m'
 SUCCESS='\e[96mSUCCESS\e[0m'
   ERROR='\e[91mERROR  \e[0m'
+ABORTED='\e[93mABORTED\e[0m'
 function _show_status() {
   local _id _state
   local -i maxlen=0 i j
-  local -a jobs logs
+  local -a jobs job_ids logs
+  trap '' SIGINT
+  trap '_clean' EXIT
   for _atom in "${ATOMS[@]}"; do
     if [[ ${#_atom} -gt ${maxlen} ]]; then
       maxlen=${#_atom}
@@ -303,7 +343,18 @@ function _show_status() {
       break
     fi
     if [[ ${_id} =~ ^[[:digit:]]+$ ]]; then
-      eval "STATUS[${_id}]='${_state}'"
+      if [[ ${_state} != 'ABORTED' ]]; then
+        if [[ ${_state} =~ RUNNING ]]; then
+          eval "job_ids[${_id}]=${_state#RUNNING}"
+          eval "STATUS[${_id}]='${_state%G*}G'"
+        else
+          eval "STATUS[${_id}]='${_state}'"
+        fi
+      else
+        if [[ ${STATUS[${_id}]} =~ RUNNING|WAITING ]]; then
+          eval "STATUS[${_id}]='${_state}'"
+        fi
+      fi
       if [[ -n ${_log} ]]; then
         eval "logs[${_id}]='  LOG: ${_log}'"
       else
@@ -312,12 +363,12 @@ function _show_status() {
     fi
     exec &>/dev/tty
     echo -ne '\e[H\e[J\e[40m'
-    echo " testEbuilds.sh "
+    echo " testEbuilds.sh [PID: $$] "
     echo -ne '\e[0m'
     _print_config
     echo $'\n'"Job list:"
     for (( i = 0; i < ${#jobs[@]}; ++i )); do
-      eval "echo -e \"  ${jobs[i]}: \${${STATUS[i]}}${logs[i]}\""
+      eval "echo -e \"  ${jobs[i]} [${job_ids[i]}]: \${${STATUS[i]}}${logs[i]}\""
     done
   done
 }
@@ -326,6 +377,7 @@ function _show_status() {
 function _store_jobs() {
   local _counted=0
   local -i _counts=0
+  trap '' SIGINT
   while true; do
     read -r _op _
     eval "_counts=\$(( ${_counts} ${_op} 1 ))"
@@ -351,23 +403,25 @@ function _store_jobs() {
 function _test() {
   local -i ret=0 i
   local _atoms=( ${3} )
-  local _atom _arg _this_log _success_state='SUCCESS'
+  local _atom _arg _this_log _state='SUCCESS'
+  trap '_aborted=1' SIGINT
+  trap 'echo "${6} ${_state} ${_this_log}" >&${FD_STATUS}' EXIT
   if [[ ${PRETEND_FLAG} == 1 ]]; then
     _arg='-p'
     _this_log="${4}"
-    _success_state='PRETEND'
+    _state='PRETEND'
   fi
   local _cmd="${BWRAPCMD_U/EACHBASEPATH/${1}}"
   for (( i = 0; i < ${#_atoms[@]}; ++i )); do
     _atom+=" \"${_atoms[i]}\""
   done
-  eval "${_cmd/TMPFSPATH/${2}} /bin/bash --login -c '${MERGECMD} ${_arg} ${_atom}' &>'${4}'" || ret=1
+  eval "${_cmd/TMPFSPATH/${2}} /bin/bash --login -c '${MERGECMD} ${_arg} ${_atom}' &>>'${4}'" || ret=1
   if [[ ${ret} -ne 0 ]]; then
-    echo "${6} ERROR ${4}" >&${FD_STATUS}
+    _this_log=${4}
+    [[ -n ${_aborted} ]] && _state="ABORTED" || _state="ERROR"
     _log e "'${3}' error!"
     _log w "LOG: ${4}"
   else
-    echo "${6} ${_success_state} ${_this_log}" >&${FD_STATUS}
     case ${REMOVE_WHEN_SUCCESSED} in
       [13])
         _log i "removing snapshot '${1}' ..."
@@ -393,7 +447,7 @@ function _test() {
         ;;
     esac
   fi
-  echo "-" >&${FD_JOBS_STORE}
+  echo "-" >&${FD_JOBS_STORE} # will be executed even if a SIGINT got
 }
 
 # bug: https://github.com/containers/bubblewrap/issues/329
@@ -404,27 +458,46 @@ function _workaround() {
   echo "chmod 1777 /dev/shm" >"${1}"/etc/profile.d/99-bwrap.sh
 }
 
+# $1: ATOM NAME
+# $2: BASEPATH
+# $3: EACHBASEPATH
+# $4: EACHTMPPATH
+function _prepare_env() {
+  _log i "Creating snapshot for '${1}' ..."
+  if btrfs subvolume show ${3} 2>/dev/null; then
+    _log i "Snapshot exists, reuse it ..."
+  else
+    mkdir ${3%/*}
+    btrfs subvolume snapshot "${2}" "${3}"
+    _log i "Snapshot '${3}' created."
+    _workaround "${3}"
+    _log i "Patching portage ..."
+    sed -i 's/0o660/0o644/' "${3}"/usr/lib/python*/site-packages/portage/util/_async/PipeLogger.py
+    sed -i 's/0o700/0o755/' "${3}"/usr/lib/python*/site-packages/portage/package/ebuild/prepare_build_dirs.py
+    sed -i 's/0700/0755/' "${3}"/usr/share/portage/config/make.globals
+  fi
+  _log i "Mounting tmpfs for '${1}' ..."
+  if [[ $(findmnt -T "${4}" -o SOURCE -P | cut -d'"' -f2) != "tmpfs" ]]; then
+    mkdir -p "${4}"
+    mount -t tmpfs tmpfs "${4}"
+    _log i "Tmpfs has been mounted at '${4}'."
+  else
+    _log i "Tmpfs exists, reuse it ..."
+  fi
+}
+
 LOGLEVEL=1
-if [[ ${INTERACTIVE} == 1 ]]; then
+_log n "ID: ${CURRENTID}"
+if [[ ${RUNNINGMODE} == 'I' ]]; then
   #interactive mode
   EACHWORKPATH="${WORKPATH}"/INTERACTIVE
   EACHBASEPATH="${EACHWORKPATH}"/SNAPSHOT
   EACHTMPPATH="${EACHWORKPATH}"/TMPFS
-  if [[ -z ${INTERACTIVE_ID} && ${PRINTCMD} == 0 ]]; then
-    _log i "Creating workdir ..."
-    mkdir ${EACHWORKPATH}
-    _log i "Creating snapshot ..."
-    btrfs subvolume snapshot "${FSBASEPATH}" "${EACHBASEPATH}"
-    _log i "Snapshot ${EACHBASEPATH} created."
-    _workaround "${EACHBASEPATH}"
-    _log i "Mounting tmpfs ..."
-    mkdir "${EACHTMPPATH}"
-    mount -t tmpfs tmpfs "${EACHTMPPATH}"
-    _log i "Tmpfs has been mounted at ${EACHTMPPATH}."
+  if [[ ${PRINTCMD} == 0 ]]; then
+    _prepare_env 'INTERACTIVE' "${FSBASEPATH}" "${EACHBASEPATH}" "${EACHTMPPATH}"
   fi
   _print_config
   echo
-  _log n "ID: ${CURRENTID}"
   BWRAPCMD_EACH="${BWRAPCMD_U/EACHBASEPATH/${EACHBASEPATH}}"
   if [[ ${PRINTCMD} == 1 ]]; then
     echo "${BWRAPCMD_EACH/TMPFSPATH/${EACHTMPPATH}} /bin/bash --login"
@@ -433,10 +506,6 @@ if [[ ${INTERACTIVE} == 1 ]]; then
   fi
 else
   #parallel mode
-  _create_fd
-  exec 1>&${FD_LOG}
-  exec 2>&${FD_ERR}
-  BWRAPCMD_EACH=''
   exec {FD_STATUS}> >(_show_status)
   exec {FD_JOBS_STORE}> >(_store_jobs)
   echo "A WAITING" >&${FD_STATUS}
@@ -461,27 +530,14 @@ else
     EACHTMPPATH="${EACHWORKPATH}"/TMPFS
     EACHLOGPATH="${EACHWORKPATH}"/LOG
     EACHCMDPATH="${EACHWORKPATH}"/CMD
-    _log i "Creating workdir for '${atom}' ..."
-    mkdir ${EACHWORKPATH}
-    _log i "Creating snapshot for '${atom}' ..."
-    btrfs subvolume snapshot "${FSBASEPATH}" "${EACHBASEPATH}"
-    _log i "Snapshot ${EACHBASEPATH} created."
-    _log i "Mounting tmpfs for '${atom}' ..."
-    mkdir "${EACHTMPPATH}"
-    mount -t tmpfs tmpfs "${EACHTMPPATH}"
-    _log i "Tmpfs has been mounted at ${EACHTMPPATH}."
-    _workaround "${EACHBASEPATH}"
-    _log i "Patching portage ..."
-    sed -i 's/0o660/0o644/' "${EACHBASEPATH}"/usr/lib/python*/site-packages/portage/util/_async/PipeLogger.py
-    sed -i 's/0o700/0o755/' "${EACHBASEPATH}"/usr/lib/python*/site-packages/portage/package/ebuild/prepare_build_dirs.py
-    sed -i 's/0700/0755/' "${EACHBASEPATH}"/usr/share/portage/config/make.globals
+    _prepare_env "${atom}" "${FSBASEPATH}" "${EACHBASEPATH}" "${EACHTMPPATH}"
     _log i "Testing '${atom}' ..."
     _test "${EACHBASEPATH}" "${EACHTMPPATH}" "${atom}" "${EACHLOGPATH}" "${EACHCMDPATH}" "${JOB}" &
-    echo "${JOB} RUNNING ${EACHLOGPATH}" >&${FD_STATUS}
+    echo "${JOB} RUNNING${!} ${EACHLOGPATH}" >&${FD_STATUS}
     echo "+" >&${FD_JOBS_STORE}
     JOB+=1
     BWRAPCMD_EACH="${BWRAPCMD_U/EACHBASEPATH/${EACHBASEPATH}}"
-    echo -n "${BWRAPCMD_EACH/TMPFSPATH/${EACHTMPPATH}} /bin/bash --login" >"${EACHCMDPATH}"
+    echo "${BWRAPCMD_EACH/TMPFSPATH/${EACHTMPPATH}} /bin/bash --login" >>"${EACHCMDPATH}"
     echo "run"
     _log n "  tail -f '${EACHLOGPATH}'"
     echo "to see the log, and can run command in the following file"
