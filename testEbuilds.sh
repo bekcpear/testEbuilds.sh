@@ -320,7 +320,7 @@ trap '_lineno=$(( ${LINENO} - 1 ))
 exec &>/dev/tty
 set +e
 echo >${TMPPATH}/_IS_ABORTED
-echo "${JOB} FATAL [ERROR-AT-LINE:${_lineno}]" >&${FD_STATUS}
+echo "${JOB} FATAL [ERROR:L${_lineno};CALLER:L$(caller)]" >&${FD_STATUS}
 trap SIGINT
 kill -INT 0' ERR
 

@@ -68,7 +68,7 @@ function _log() {
     local prefix=""
     local msg="${@}"
     if [[ ${lv} != 2 ]]; then
-      prefix="[$(date '+%Y-%m-%d %H:%M:%S')] "
+      prefix="[$(date '+%Y-%m-%d %H:%M:%S')] " || true
     fi
     eval ">${ofd} echo -e '${color}${prefix}${msg//\'/\'\\\'\'}${reset}'"
   fi
