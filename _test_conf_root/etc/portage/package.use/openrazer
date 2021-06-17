@@ -1,0 +1,6 @@
+# required by dev-python/PyQt5-5.15.2::gentoo[multimedia]
+# required by dev-python/pyudev-0.22.0::gentoo[qt5,-test]
+# required by sys-apps/openrazer-3.0.1::ryans
+# required by app-misc/razergenie-9999::ryans
+# required by app-misc/razergenie (argument)
+>=dev-qt/qtmultimedia-5.15.2 widgets
