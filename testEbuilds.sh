@@ -36,7 +36,7 @@ DISTFILES_PATH='/var/cache/distfiles'
 #############################################
 #############################################
 #############################################
-set -e
+set -eE
 
 STARTTIME=$(date +%s)
 FSBASEPATH="${FSBASEPATH%/}"
@@ -213,9 +213,12 @@ case ${RUNNINGMODE} in
       declare -r CURRENTID=${INTERACTIVE_ID}
     fi
     ;;
+  M)
+    declare -r CURRENTID="MAINTEANANCE_MODE"
+    ;;
 esac
-declare -r WORKPATH="${FSBASEPATH%/*}"/_testEbuilds-${CURRENTID}
-declare -r TMPPATH=/tmp/_testEbuilds-${CURRENTID}
+declare -r WORKPATH="${FSBASEPATH%/*}"/_testEbuilds:${CURRENTID}
+declare -r TMPPATH=/tmp/_testEbuilds:${CURRENTID}
 declare -r MERGEARGS
 declare -r MERGECMD="${MERGEENVS} emerge ${EMERGE_OPTS} ${EXTRAOPTS}"
 
@@ -236,7 +239,7 @@ function _close_fd() {
   eval "exec ${FD_LOG}>&-"
   eval "exec ${FD_ERR}>&-"
 }
-if [[ ${RUNNINGMODE} == 'P' ]]; then
+if [[ ${RUNNINGMODE} == P ]]; then
   _create_fd
   exec 1>&${FD_LOG}
   exec 2>&${FD_ERR}
@@ -266,15 +269,27 @@ fi
 # remove tmp files and notify something when shell exits
 function _clean() {
   set +e
-  [[ ! -e ${TMPPATH}/_IS_ABORTED ]] || echo $'\n'"aborting ..."
-  echo
-  echo "removing ${TMPPATH} ..."
-  rm -rf ${TMPPATH}
-  if [[ ${PRESERVE_TMP_ERR_LOG} == 0 ]]; then
-    echo "removing ${TMPPATH}.err.log ..."
-    rm -rf ${TMPPATH}.err.log
+  if [[ -e ${TMPPATH}/_IS_ABORTED ]]; then
+    echo $'\n'"aborting ..."
+  else
+    exec </dev/tty
+    echo
+    while read -p "All jobs are done. exit? [y/N] " -r _choice; do
+      [[ ${_choice} =~ ^y|Y$ ]] && break
+    done
   fi
-  if [[ $(ls -A ${WORKPATH}) == "repos.conf" ]]; then
+  echo
+  if [[ -d "${TMPPATH}" ]]; then
+    echo "removing ${TMPPATH} ..."
+    rm -rf ${TMPPATH}
+  fi
+  if [[ ${PRESERVE_TMP_ERR_LOG} == 0 ]]; then
+    if [[ -e "${TMPPATH}".err.log ]]; then
+      echo "removing ${TMPPATH}.err.log ..."
+      rm -f ${TMPPATH}.err.log
+    fi
+  fi
+  if [[ $(ls -A ${WORKPATH} 2>/dev/null) == "repos.conf" ]]; then
     rm -rf ${WORKPATH}/repos.conf
     rmdir --ignore-fail-on-non-empty ${WORKPATH}
   fi
@@ -289,17 +304,25 @@ function _clean() {
   fi
   _log n "ID: ${CURRENTID}"
 }
+
 trap 'exec &>/dev/tty
 _close_fd
-if [[ ${RUNNINGMODE} == "I" ]]; then
-  _log n "ID: ${CURRENTID}"
+if [[ ${RUNNINGMODE} != P ]]; then
+  _clean
 fi
 ' EXIT
 trap 'exec &>/dev/tty
+set +e
 echo >${TMPPATH}/_IS_ABORTED
 trap SIGINT
-trap SIGTERM
 kill -INT 0' SIGINT SIGTERM
+trap '_lineno=$(( ${LINENO} - 1 ))
+exec &>/dev/tty
+set +e
+echo >${TMPPATH}/_IS_ABORTED
+echo "${JOB} FATAL [ERROR-AT-LINE:${_lineno}]" >&${FD_STATUS}
+trap SIGINT
+kill -INT 0' ERR
 
 declare -r BWRAPCMD_U="bwrap \
   --bind 'EACHBASEPATH' / \
@@ -330,6 +353,7 @@ PRETEND='\e[36mPRETEND\e[0m'
 SUCCESS='\e[96mSUCCESS\e[0m'
   ERROR='\e[91mERROR  \e[0m'
 ABORTED='\e[93mABORTED\e[0m'
+  FATAL='\e[91m\e[107m\e[7m FATAL \e[0m'
 function _show_status() {
   local _id _state
   local -i maxlen=0 i j
@@ -352,6 +376,7 @@ function _show_status() {
   while true; do
     read -r _id _state _log _
     if [[ ${_id} == "_" ]]; then
+      # the normal exit place
       break
     fi
     if [[ ${_id} =~ ^[[:digit:]]+$ ]]; then
@@ -386,6 +411,7 @@ function _show_status() {
 }
 
 # store the current jobs count
+_STORE_JOBS_ID=0
 function _store_jobs() {
   local _counted=0
   local -i _counts=0
@@ -537,6 +563,7 @@ case ${RUNNINGMODE} in
     #parallel mode
     exec {FD_STATUS}> >(_show_status)
     exec {FD_JOBS_STORE}> >(_store_jobs)
+    _STORE_JOBS_ID=$!
     echo "A WAITING" >&${FD_STATUS}
 
     declare -i JOB=0
@@ -575,12 +602,6 @@ case ${RUNNINGMODE} in
       echo "to enter the test environment interactively."
       echo
     done
-
     wait
-    exec &>/dev/tty
-    echo
-    while read -p 'All jobs are finished, exit?[y/N] ' choice; do
-      [[ ${choice} =~ ^y|Y$ ]] && exit 0
-    done
     ;;
 esac
