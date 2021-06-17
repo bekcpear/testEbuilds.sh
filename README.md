@@ -2,16 +2,27 @@
 
 This is a script to test ebuilds on Gentoo Linux.
 
-deps:
+- the environment is based on the btrfs subvolume
+- root user needed
 
-- BtrFS
+Dependencies:
+
+- BtrFS and its tools
 - bubblewrap
+- standard linux tools
 
-e.g.
+Preparation:
 
-setup the first few lines in the shell, and run:
+- create a btrfs subvolume, refer to the btrfs contents of [Preparing a chroot environment
+](https://wiki.gentoo.org/wiki/Chroot_for_package_testing#Preparing_a_chroot_environment)
+- setup the first few lines in the shell, especially the `REPO_gentoo` variable.
+
+Run:
 
 ```bash
+./testEbuilds.sh --help #show help message
+
+export FSBASEPATH=/path/to/the/base/subvolume
 # parallel mode
 ./testEbuilds.sh -d /path/to/_test_conf_root -r /path/to/extra/repo fcitx5-rime fcitx5-configtool fcitx5-gtk
 
