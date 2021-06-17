@@ -271,7 +271,7 @@ function _clean() {
   set +e
   if [[ -e ${TMPPATH}/_IS_ABORTED ]]; then
     echo $'\n'"aborting ..."
-  else
+  elif [[ ${RUNNINGMODE} == P ]]; then
     exec </dev/tty
     echo
     while read -p "All jobs are done. exit? [y/N] " -r _choice; do
@@ -505,7 +505,7 @@ function _prepare_env() {
   if btrfs subvolume show ${3} 2>/dev/null; then
     _log i "Snapshot exists, reuse it ..."
   else
-    mkdir ${3%/*}
+    mkdir -p ${3%/*}
     btrfs subvolume snapshot "${2}" "${3}"
     _log i "Snapshot '${3}' created."
     _workaround "${3}"
@@ -537,6 +537,7 @@ case ${RUNNINGMODE} in
     BWRAPCMD_EACH="$(_humanize_cmd ${BWRAPCMD_EACH})"
     BWRAPCMD_EACH="${BWRAPCMD_EACH/--bind[[:space:]]\'TMPFSPATH\'/--tmpfs}"
     echo "RUN: ${BWRAPCMD_EACH} /bin/bash --login"
+    _log n "Don't forget to execute: chmod 1777 /dev/shm"
     eval "${BWRAPCMD_EACH} /bin/bash --login"
     _log n "Leave maintenance mode ..."
     ;;
