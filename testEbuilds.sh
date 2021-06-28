@@ -22,7 +22,7 @@ EMERGE_OPTS='--autounmask=y --keep-going -jtv1'
 #   the FSBASEPATH can be set via environment variable when
 #   running this script to satisfy a specific test environment.
 : ${FSBASEPATH:=/mnt/gentoo-test/stage3}
-REPO_gentoo='/var/db/repos/gentoo.git/gentoo'
+REPO_gentoo='/var/db/repos/gentoo'
 DISTFILES_PATH='/var/cache/distfiles'
 # SHOULD BE ABSOLUTE PATHES
 
