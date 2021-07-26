@@ -549,7 +549,7 @@ case ${RUNNINGMODE} in
     BWRAPCMD_EACH="${BWRAPCMD_EACH/--bind[[:space:]]\'TMPFSPATH\'/--tmpfs}"
     echo "RUN: ${BWRAPCMD_EACH} /bin/bash --login"
     _log n "Don't forget to execute: chmod 1777 /dev/shm"
-    eval "${BWRAPCMD_EACH} /bin/bash --login"
+    eval "${BWRAPCMD_EACH} /bin/bash --login" || true
     _log n "Leave maintenance mode ..."
     ;;
   I)
