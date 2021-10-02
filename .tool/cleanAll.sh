@@ -11,7 +11,8 @@ SRCPATH=${SRCPATH%/.tool/*}
 
 _log n ">> umount -fv ${BASE_DIR}/_testEbuilds:*/**/TMPFS"
 if ls ${BASE_DIR}/_testEbuilds:*/**/TMPFS &>/dev/null; then
-  umount -fv ${BASE_DIR}/_testEbuilds:*/**/TMPFS
+  umount -fv ${BASE_DIR}/_testEbuilds:*/**/TMPFS || \
+    rmdir ${BASE_DIR}/_testEbuilds:*/**/TMPFS
 else
   echo "<NONE>"
 fi

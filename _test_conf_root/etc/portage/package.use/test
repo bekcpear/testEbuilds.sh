@@ -19,3 +19,5 @@
 # required by @system
 # required by @world (argument)
 >=media-libs/freetype-2.10.4 harfbuzz
+
+sys-kernel/gentoo-kernel-bin -initramfs
