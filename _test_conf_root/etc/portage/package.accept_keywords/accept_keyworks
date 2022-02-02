@@ -7,3 +7,6 @@
 dev-python/daemonize
 
 net-libs/nodejs
+
+=dev-libs/libgcrypt-1.9.4 ~amd64
+=app-crypt/gnupg-2.3.2 ~amd64
