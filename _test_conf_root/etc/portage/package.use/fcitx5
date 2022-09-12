@@ -11,3 +11,9 @@
 # required by kde-frameworks/kinit-5.82.0::gentoo
 # required by kde-frameworks/kded-5.82.0::gentoo
 >=dev-qt/qtcore-5.15.2-r2 icu
+
+# required by kde-frameworks/plasma-5.96.0-r1::gentoo
+# required by app-i18n/fcitx-configtool-5.0.15::ryans[kcm]
+# required by app-i18n/fcitx-meta-5.0.12::ryans[configtool]
+# required by fcitx-meta:5 (argument)
+>=kde-frameworks/kconfig-5.96.0 qml
